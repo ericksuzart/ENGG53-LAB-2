@@ -1,0 +1,451 @@
+{
+   "widgets": [
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "LeftAngleRad",
+               "sourceNames": [
+                  "LFrd"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "LFrd",
+                  "_id": "data-serie-160",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftEncoderRad",
+               "sourceNames": [
+                  "LErd"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "LErd",
+                  "_id": "data-serie-161",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "LeftDir",
+               "sourceNames": [
+                  "Ldir"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Ldir",
+                  "_id": "data-serie-162",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftStuck",
+               "sourceNames": [
+                  "Lstk"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lstk",
+                  "_id": "data-serie-163",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftPWM",
+               "sourceNames": [
+                  "Lpwm"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lpwm",
+                  "_id": "data-serie-164",
+                  "stroke": "rgba(46,204,113,1)",
+                  "fill": "rgba(46,204,113,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "RightAngleRad",
+               "sourceNames": [
+                  "RFrd"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "RFrd",
+                  "_id": "data-serie-165",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightEncoderRad",
+               "sourceNames": [
+                  "RErd"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "RErd",
+                  "_id": "data-serie-166",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "RightDir",
+               "sourceNames": [
+                  "Rdir"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rdir",
+                  "_id": "data-serie-167",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightStuck",
+               "sourceNames": [
+                  "Rstk"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rstk",
+                  "_id": "data-serie-168",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightPWM",
+               "sourceNames": [
+                  "Rpwm"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rpwm",
+                  "_id": "data-serie-169",
+                  "stroke": "rgba(46,204,113,1)",
+                  "fill": "rgba(46,204,113,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "LeftRPM",
+               "sourceNames": [
+                  "Lrpm"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lrpm",
+                  "_id": "data-serie-170",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "LeftEncRaw",
+               "sourceNames": [
+                  "Lraw"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lraw",
+                  "_id": "data-serie-173",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftEncMin",
+               "sourceNames": [
+                  "Lmin"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lmin",
+                  "_id": "data-serie-174",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftEncMax",
+               "sourceNames": [
+                  "Lmax"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lmax",
+                  "_id": "data-serie-175",
+                  "stroke": "rgba(46,204,113,1)",
+                  "fill": "rgba(46,204,113,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftEncThresh",
+               "sourceNames": [
+                  "Ltsh"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Ltsh",
+                  "_id": "data-serie-176",
+                  "stroke": "rgba(155,89,182,1)",
+                  "fill": "rgba(155,89,182,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "LeftEncState",
+               "sourceNames": [
+                  "Lenc"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Lenc",
+                  "_id": "data-serie-177",
+                  "stroke": "rgba(241,196,15,1)",
+                  "fill": "rgba(241,196,15,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "RightRPM",
+               "sourceNames": [
+                  "Rrpm"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rrpm",
+                  "_id": "data-serie-178",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "RightEncRaw",
+               "sourceNames": [
+                  "Rraw"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rraw",
+                  "_id": "data-serie-181",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightEncMin",
+               "sourceNames": [
+                  "Rmin"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rmin",
+                  "_id": "data-serie-182",
+                  "stroke": "rgba(52,152,219,1)",
+                  "fill": "rgba(52,152,219,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightEncMax",
+               "sourceNames": [
+                  "Rmax"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rmax",
+                  "_id": "data-serie-183",
+                  "stroke": "rgba(46,204,113,1)",
+                  "fill": "rgba(46,204,113,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightEncThresh",
+               "sourceNames": [
+                  "Rtsh"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Rtsh",
+                  "_id": "data-serie-184",
+                  "stroke": "rgba(155,89,182,1)",
+                  "fill": "rgba(155,89,182,0.1)"
+               },
+               "type": "number"
+            },
+            {
+               "name": "RightEncState",
+               "sourceNames": [
+                  "Renc"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Renc",
+                  "_id": "data-serie-185",
+                  "stroke": "rgba(241,196,15,1)",
+                  "fill": "rgba(241,196,15,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "ADCFreq",
+               "sourceNames": [
+                  "Fadc"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Fadc",
+                  "_id": "data-serie-194",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "EKFFreq",
+               "sourceNames": [
+                  "Fekf"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "Fekf",
+                  "_id": "data-serie-195",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      }
+   ],
+   "viewDuration": "5"
+}

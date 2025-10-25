@@ -1,4 +1,5 @@
 #include <ArduinoSTL.h>
+#include <util/atomic.h>
 
 #include <array>
 
@@ -24,6 +25,7 @@ constexpr int CONTROL_DIM = 3;  // [dt, pwm, direction]
 
 // Serial communication
 constexpr int SERIAL_BUFFER_SIZE = 32;
+constexpr int SERIAL_TIMEOUT_MS = 100;
 
 // Motor interface pins
 constexpr int LEFT_PWM_PIN = 6;
@@ -58,9 +60,10 @@ constexpr float MIN_DELTA_TIME = 0.001F;
 constexpr float MAX_DELTA_TIME = 0.1F;
 constexpr float INITIAL_DELTA_TIME = 0.01F;
 constexpr uint32_t INITIAL_DELAY_MS = 100U;
-constexpr uint16_t LOOP_DELAY_MICROS = 100U;
-constexpr uint32_t TELEMETRY_INTERVAL_MS = 50U;  // 20Hz
-constexpr uint32_t STUCK_THRESHOLD_MS = 10000U;  // 10 seconds
+constexpr uint16_t LOOP_DELAY_MICROS = 10U;
+constexpr uint32_t FREQ_CALC_INTERVAL_MS = 1000U;
+constexpr uint32_t TELEMETRY_INTERVAL_MS = 200U;  // 5Hz
+constexpr uint32_t STUCK_THRESHOLD_MS = 10000U;   // 10 seconds
 constexpr uint32_t MICROSECONDS_PER_SECOND = 1000000UL;
 constexpr uint32_t MILLISECONDS_PER_SECOND = 1000UL;
 
@@ -82,15 +85,17 @@ using ControlVector = vt::numeric_vector<CONTROL_DIM>;
 
 // --- Encoder ---
 
-volatile uint8_t current_channel = 0U;  // ADC channel being read
-volatile uint8_t left_raw_value = 0U;   // Latest ADC value for left encoder
-volatile uint8_t right_raw_value = 0U;  // Latest ADC value for right encoder
-volatile bool new_left_data = false;    // Flag for new left encoder data
-volatile bool new_right_data = false;   // Flag for new right encoder data
+volatile uint8_t current_channel = 0U;       // ADC channel being read
+volatile uint8_t left_raw_value = 0U;        // Latest ADC value for left encoder
+volatile uint8_t right_raw_value = 0U;       // Latest ADC value for right encoder
+volatile bool new_left_data = false;         // Flag for new left encoder data
+volatile bool new_right_data = false;        // Flag for new right encoder data
+volatile uint32_t adc_conversion_count = 0;  // ADC conversion count for frequency measurement
 
 // Tracking
 int32_t left_enc_count = 0U;
 int32_t right_enc_count = 0U;
+uint32_t ekf_filter_update_count = 0U;
 uint8_t left_prev_state = 0;
 uint8_t right_prev_state = 0;
 
@@ -429,6 +434,8 @@ class WheelKalmanState
      */
     void update_filter(float measured_angle, uint32_t current_time, int pwm_value, int direction_value)
     {
+        ekf_filter_update_count++;
+
         float delta_time =
           static_cast<float>(current_time - last_update_us_) / static_cast<float>(MICROSECONDS_PER_SECOND);
 
@@ -594,12 +601,17 @@ void analogWrite_direct(uint8_t pin, uint8_t value)
  */
 void setup_adc_free_running()
 {
-    // REFS0 = 1: Use AVcc as reference, ADLAR = 1: Left adjust result (8-bit mode)
-    ADMUX = (1U << REFS0) | (1U << ADLAR) | (current_channel & PIN_MASK);
-    // Enable ADC, Auto Trigger Enable, ADC Interrupt, and set prescaler to 64 (faster conversion)
-    ADCSRA = (1U << ADEN) | (1U << ADATE) | (1U << ADIE) | (1U << ADPS2) | (1U << ADPS1);
+    // Configure ADC prescaler for 125 kHz ADC clock (16MHz / 128 = 125kHz)
+    // This gives us a conversion time of 13 cycles = 104 µs per conversion
+    ADCSRA =
+      (1U << ADEN) | (1U << ADATE) | (1U << ADIE) | (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);  // Prescaler 128
+
     // Set trigger source to Free Running mode
     ADCSRB = 0U;
+
+    // Configure first channel with AVcc reference and left-adjusted result (8-bit mode)
+    ADMUX = (1U << REFS0) | (1U << ADLAR) | (current_channel & PIN_MASK);
+
     // Start first conversion
     ADCSRA |= (1U << ADSC);
 }
@@ -612,6 +624,7 @@ void setup_adc_free_running()
 ISR(ADC_vect)
 {
     const uint8_t result = ADCH;
+    ++adc_conversion_count;
 
     if (current_channel == LEFT_ENC_PIN)
     {
@@ -639,12 +652,8 @@ ISR(ADC_vect)
  */
 void update_dynamic_thresholds()
 {
-    if (left_sample_count >= MIN_SAMPLE_COUNT)
-        left_threshold = static_cast<uint8_t>((static_cast<uint16_t>(left_min) + static_cast<uint16_t>(left_max)) / 2U);
-
-    if (right_sample_count >= MIN_SAMPLE_COUNT)
-        right_threshold =
-          static_cast<uint8_t>((static_cast<uint16_t>(right_min) + static_cast<uint16_t>(right_max)) / 2U);
+    left_threshold = static_cast<uint8_t>((static_cast<uint16_t>(left_min) + static_cast<uint16_t>(left_max)) / 2U);
+    right_threshold = static_cast<uint8_t>((static_cast<uint16_t>(right_min) + static_cast<uint16_t>(right_max)) / 2U);
 }
 
 // ============================================================================
@@ -690,9 +699,9 @@ void process_encoder_data(volatile uint8_t & raw_value, uint8_t & min_val, uint8
 /**
  * @brief Processes encoder data and updates Kalman filters for both wheels
  */
-void update_encoder_counts_and_speed()
+void update_encoder_and_ekf()
 {
-    // Process left encoder daWta
+    // Process left encoder data
     if (new_left_data)
     {
         process_encoder_data(left_raw_value, left_min, left_max, left_sample_count, left_threshold, left_prev_state,
@@ -711,6 +720,42 @@ void update_encoder_counts_and_speed()
     update_dynamic_thresholds();
 }
 
+/**
+ * @brief Calculates and resets filter update frequencies
+ */
+void calculate_frequency(int & adc_frequency, int & ekf_frequency)
+{
+    static uint32_t last_adc_count = 0U;
+    static uint32_t last_filter_count = 0U;
+    static uint32_t last_time = 0U;
+
+    const uint32_t current_time = millis();
+    const uint32_t elapsed_time = current_time - last_time;
+
+    if (elapsed_time >= FREQ_CALC_INTERVAL_MS)
+    {
+        uint32_t adc_count;
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+        {
+            // necessary to prevent content modification during read
+            // https://docs.arduino.cc/language-reference/en/variables/variable-scope-qualifiers/volatile/
+            adc_count = adc_conversion_count;
+        }
+
+        const uint32_t filter_count = ekf_filter_update_count;
+        const uint32_t adc_diff = adc_count - last_adc_count;
+        const uint32_t filter_diff = filter_count - last_filter_count;
+
+        adc_frequency = (adc_diff * 1000U + elapsed_time / 2U) / elapsed_time;
+        ekf_frequency = (filter_diff * 1000U + elapsed_time / 2U) / elapsed_time;
+
+        // Reset counters for next calculation
+        last_adc_count = adc_count;
+        last_filter_count = filter_count;
+        last_time = current_time;
+    }
+}
+
 // ============================================================================
 // SERIAL COMMUNICATION
 // ============================================================================
@@ -720,9 +765,13 @@ void update_encoder_counts_and_speed()
  */
 void readSerialData()
 {
-    while (Serial.available() > 0 && !newCommand)
+    uint8_t chars_read = 0;
+    constexpr uint8_t MAX_CHARS_PER_LOOP = 12;
+
+    while (Serial.available() > 0 && !newCommand && chars_read < MAX_CHARS_PER_LOOP)
     {
         const char character = static_cast<char>(Serial.read());
+        chars_read++;
 
         if (character == '\n' || character == '\r')
         {
@@ -731,6 +780,7 @@ void readSerialData()
                 serialBuffer[serialIndex] = '\0';
                 newCommand = true;
                 serialIndex = 0U;
+                break;  // Exit early when command complete
             }
         }
         else if (serialIndex < (SERIAL_BUFFER_SIZE - 1U))
@@ -819,100 +869,93 @@ void processSerialCommand()
 /**
  * @brief Prints telemetry data for Teleplot visualization and debugging
  */
-void print_telemetry_data()
+void serial_print_telemetry()
 {
     const uint32_t current_time = micros();
 
     const StateVector & left_state = left_kalman.get_state_vector();
     const StateVector & right_state = right_kalman.get_state_vector();
 
+    // Calculate filter frequencies
+    static int adc_frequency = 0;
+    static int ekf_frequency = 0;
+    calculate_frequency(adc_frequency, ekf_frequency);
+
     // left wheel data
     const float left_encoder_rad = static_cast<float>(left_enc_count) * RADIANS_PER_COUNT;
-    const float left_angle_rad = left_state[0];
-    const float left_velocity_rad_s = left_state[1];
-    const float left_rpm = (left_velocity_rad_s * 60.0F) / TWO_PI;
-    const float left_acceleration_rad_s2 = left_state[2];
+    const float left_filter_angle_rad = left_state[0];
+    const float left_rpm = (left_state[1] * 60.0F) / TWO_PI;
     const bool is_left_stuck = left_kalman.is_stuck(current_time);
     const float left_pwm_norm = static_cast<float>(left_pwm) / 255.0f;
     const int left_enc_state = left_prev_state ? left_max : left_min;
 
     // right wheel data
     const float right_encoder_rad = static_cast<float>(right_enc_count) * RADIANS_PER_COUNT;
-    const float right_angle_rad = right_state[0];
-    const float right_velocity_rad_s = right_state[1];
-    const float right_rpm = (right_velocity_rad_s * 60.0F) / TWO_PI;
-    const float right_acceleration_rad_s2 = right_state[2];
+    const float right_filter_angle_rad = right_state[0];
+    const float right_rpm = (right_state[1] * 60.0F) / TWO_PI;
     const bool is_right_stuck = right_kalman.is_stuck(current_time);
     const float right_pwm_norm = static_cast<float>(right_pwm) / 255.0f;
     const int right_enc_state = right_prev_state ? right_max : right_min;
 
     // Position data
-    Serial.print(">LeftAngleRad:");
-    Serial.println(left_angle_rad, 4);
-    Serial.print(">RightAngleRad:");
-    Serial.println(right_angle_rad, 4);
-    Serial.print(">LeftCount:");
-    Serial.println(left_enc_count);
-    Serial.print(">RightCount:");
-    Serial.println(right_enc_count);
+    Serial.print(">LFrd:");
+    Serial.println(left_filter_angle_rad, 4);
+    Serial.print(">RFrd:");
+    Serial.println(right_filter_angle_rad, 4);
+    Serial.print(">LErd:");
+    Serial.println(left_encoder_rad, 2);
+    Serial.print(">RErd:");
+    Serial.println(right_encoder_rad, 2);
 
     // Speed data
-    Serial.print(">LeftVelocityRadSec:");
-    Serial.println(left_velocity_rad_s, 4);
-    Serial.print(">RightVelocityRadSec:");
-    Serial.println(right_velocity_rad_s, 4);
-    Serial.print(">LeftRPM:");
-    Serial.println(left_rpm, 2);
-    Serial.print(">RightRPM:");
-    Serial.println(right_rpm, 2);
-
-    // Acceleration data
-    Serial.print(">LeftAccelRadSec2:");
-    Serial.println(left_acceleration_rad_s2, 4);
-    Serial.print(">RightAccelRadSec2:");
-    Serial.println(right_acceleration_rad_s2, 4);
+    Serial.print(">Lrpm:");
+    Serial.println(left_rpm, 4);
+    Serial.print(">Rrpm:");
+    Serial.println(right_rpm, 4);
 
     // Motor control data
-    Serial.print(">LeftPWMNorm:");
-    Serial.println(left_pwm_norm, 3);
-    Serial.print(">RightPWMNorm:");
-    Serial.println(right_pwm_norm, 3);
-    Serial.print(">LeftDir:");
+    Serial.print(">Lpwm:");
+    Serial.println(left_pwm_norm, 2);
+    Serial.print(">Rpwm:");
+    Serial.println(right_pwm_norm, 2);
+    Serial.print(">Ldir:");
     Serial.println(left_direction);
-    Serial.print(">RightDir:");
+    Serial.print(">Rdir:");
     Serial.println(right_direction);
 
     // Movement detection
-    Serial.print(">LeftStuck:");
+    Serial.print(">Lstk:");
     Serial.println(is_left_stuck);
-    Serial.print(">RightStuck:");
+    Serial.print(">Rstk:");
     Serial.println(is_right_stuck);
 
     // Encoder data
-    Serial.print(">LeftRaw:");
+    Serial.print(">Lraw:");
     Serial.println(left_raw_value);
-    Serial.print(">RightRaw:");
+    Serial.print(">Rraw:");
     Serial.println(right_raw_value);
-    Serial.print(">LeftMin:");
+    Serial.print(">Lmin:");
     Serial.println(left_min);
-    Serial.print(">LeftMax:");
+    Serial.print(">Lmax:");
     Serial.println(left_max);
-    Serial.print(">RightMin:");
+    Serial.print(">Rmin:");
     Serial.println(right_min);
-    Serial.print(">RightMax:");
+    Serial.print(">Rmax:");
     Serial.println(right_max);
-    Serial.print(">LeftThresh:");
+    Serial.print(">Ltsh:");
     Serial.println(left_threshold);
-    Serial.print(">RightThresh:");
+    Serial.print(">Rtsh:");
     Serial.println(right_threshold);
-    Serial.print(">LeftEncoderRad:");
-    Serial.println(left_encoder_rad, 4);
-    Serial.print(">RightEncoderRad:");
-    Serial.println(right_encoder_rad, 4);
-    Serial.print(">LeftEncState:");
+    Serial.print(">Lenc:");
     Serial.println(left_enc_state);
-    Serial.print(">RightEncState:");
+    Serial.print(">Renc:");
     Serial.println(right_enc_state);
+
+    // Frequency data
+    Serial.print(">Fadc:");
+    Serial.println(adc_frequency);
+    Serial.print(">Fekf:");
+    Serial.println(ekf_frequency);
 }
 
 // ============================================================================
@@ -927,6 +970,7 @@ void setup()
 
     // Initialize serial communication
     Serial.begin(BAUD_RATE);
+    Serial.setTimeout(SERIAL_TIMEOUT_MS);
 
     Serial.println("Teleplot: arduino telemetry");
     Serial.println("Send commands: L<pwm>R<pwm>D<left_dir><right_dir>");
@@ -941,16 +985,15 @@ void setup()
 
 void loop()
 {
-    static uint32_t last_telemetry_time = 0U;
-
     // Main processing pipeline
+    update_encoder_and_ekf();
     readSerialData();
     processSerialCommand();
-    update_encoder_counts_and_speed();
 
-    // Telemetry output at 20Hz using non-blocking delay
+#if TELEMETRY
+    static uint32_t last_telemetry_time = 0U;
+
     if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
-        print_telemetry_data();
-
-    delayMicroseconds(LOOP_DELAY_MICROS);
+        serial_print_telemetry();
+#endif  // TELEMETRY
 }

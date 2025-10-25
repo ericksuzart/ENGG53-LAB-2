@@ -18,7 +18,8 @@
                 "platformio.platformio-ide",
                 "pbkit.vscode-pbkit",
                 "jeff-hykin.better-cpp-syntax",
-                "VisualStudioExptTeam.vscodeintellicode-completions"
+                "VisualStudioExptTeam.vscodeintellicode-completions",
+                "alexnesnes.teleplot"
             ]
         }
     },
