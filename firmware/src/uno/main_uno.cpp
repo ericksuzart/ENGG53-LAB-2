@@ -2,6 +2,7 @@
 #include <util/atomic.h>
 
 #include <array>
+#include <cmath>
 
 #undef min
 #undef max
@@ -169,6 +170,16 @@ bool nonBlockingDelay(uint32_t & last_time, const uint32_t & ms_delay)
     }
     return false;
 }
+
+// helper sign
+static inline int signf(float x)
+{
+    return (x > 0.0f) - (x < 0.0f);
+}
+
+// PWM slew limiter globals
+constexpr float PWM_SLEW_RATE_PER_MS = 100.0f;  // max pwm change per millisecond (tune)
+uint32_t last_pwm_update_us = 0U;
 
 // ============================================================================
 // KALMAN FILTER IMPLEMENTATION
@@ -479,6 +490,101 @@ WheelKalmanState left_kalman;
 WheelKalmanState right_kalman;
 
 // ============================================================================
+// PID controller implementation
+// ============================================================================
+
+struct PIDController
+{
+    float kp;
+    float ki;
+    float kd;
+
+    float integral;
+    float prev_error;
+    uint32_t last_time_us;
+
+    float integral_min;
+    float integral_max;
+
+    PIDController()
+    : kp(2.0F),
+      ki(0.5F),
+      kd(0.0F),
+      integral(0.0F),
+      prev_error(0.0F),
+      last_time_us(0U),
+      integral_min(-1000.0F),
+      integral_max(1000.0F)
+    {
+    }
+
+    void reset()
+    {
+        integral = 0.0F;
+        prev_error = 0.0F;
+        last_time_us = 0U;
+    }
+
+    /**
+     * @brief Compute control signal (units: same as u — we'll use it to produce PWM)
+     * @param target target RPM (signed: sign encodes direction)
+     * @param measurement measured RPM (signed)
+     * @return control output (signed). We'll map absolute value -> pwm (0..255), sign -> direction
+     */
+    float update(float target, float measurement, float ff_compensation, bool is_actuator_saturated)
+    {
+        const uint32_t now = micros();
+        float dt = 0.001f;
+        if (last_time_us != 0U)
+        {
+            dt = (static_cast<float>(now - last_time_us)) / 1e6f;
+            if (dt <= 0.0f)
+                dt = 0.001f;
+        }
+        last_time_us = now;
+
+        const float error = target - measurement;
+
+        // derivative from error (error is on RPM, measurement is EKF filtered)
+        const float derivative = (error - prev_error) / dt;
+
+        // Anti-windup: only integrate if output not saturated OR error is reducing
+        // is_actuator_saturated true = actuator capped at output; don't integrate in that case unless error sign
+        // matches correction
+        bool allow_integration = !is_actuator_saturated;
+        if (!allow_integration)
+        {
+            // allow integration if the integrator would help reduce the saturation (simple heuristic)
+            float u_no_i = kp * error + kd * derivative + ff_compensation;
+            if (signf(u_no_i) == signf(error))
+                allow_integration = true;
+        }
+
+        if (allow_integration)
+        {
+            integral += error * dt;
+            if (integral > integral_max)
+                integral = integral_max;
+            else if (integral < integral_min)
+                integral = integral_min;
+        }
+
+        prev_error = error;
+        const float u = kp * error + ki * integral + kd * derivative + ff_compensation;
+        return u;
+    }
+};
+
+// Per-wheel PID instances and control flags
+PIDController left_pid;
+PIDController right_pid;
+
+volatile float left_target_rpm = 0.0F;
+volatile float right_target_rpm = 0.0F;
+volatile bool left_pid_enabled = false;
+volatile bool right_pid_enabled = false;
+
+// ============================================================================
 // HARDWARE ABSTRACTION LAYER
 // ============================================================================
 
@@ -772,7 +878,13 @@ void readSerialData()
 }
 
 /**
- * @brief Processes serial commands for motor control
+ * @brief Processes serial commands for motor control and PID setpoints.
+ *
+ * Supported commands:
+ *  - Legacy: L<pwm>R<pwm>D<left_dir><right_dir>  (unchanged)
+ *  - New: T<left_rpm>,<right_rpm>   (example: T120,90)  -> enables PID for wheels
+ *
+ * When you send an L or R legacy PWM command for a wheel the PID for that wheel is disabled.
  */
 void processSerialCommand()
 {
@@ -782,28 +894,65 @@ void processSerialCommand()
     newCommand = false;
     char * pointer = serialBuffer.data();
 
-    // Parse left PWM
+    // Trim leading whitespace
+    while (*pointer == ' ' || *pointer == '\t')
+        ++pointer;
+
+    // New target command: T<left_rpm>,<right_rpm>
+    if (*pointer == 'T')
+    {
+        ++pointer;
+        // parse left rpm (integer)
+        char * endptr = nullptr;
+        long lrpm = strtol(pointer, &endptr, 10);
+        if (endptr != pointer)
+        {
+            left_target_rpm = static_cast<float>(lrpm);
+            pointer = endptr;
+            // skip commas/spaces
+            while (*pointer == ',' || *pointer == ' ' || *pointer == '\t')
+                ++pointer;
+            // parse right rpm
+            long rrpm = strtol(pointer, &endptr, 10);
+            if (endptr != pointer)
+            {
+                right_target_rpm = static_cast<float>(rrpm);
+            }
+            // enable PID for wheels where a valid target was provided
+            left_pid_enabled = true;
+            right_pid_enabled = true;
+
+            // reset integrator/derivative history to avoid big jumps
+            left_pid.reset();
+            right_pid.reset();
+        }
+        // done processing T-command
+        return;
+    }
+
+    // Parse left PWM (legacy) - disables left PID
     if (*pointer == 'L')
     {
         ++pointer;
-        // Use strtol instead of atoi for better error handling
         left_pwm = static_cast<uint8_t>(strtol(pointer, &pointer, 10));
+        left_pid_enabled = false;  // manual override disables PID for that wheel
 
         while (*pointer && *pointer != 'R')
             ++pointer;
     }
 
-    // Parse right PWM
+    // Parse right PWM (legacy) - disables right PID
     if (*pointer == 'R')
     {
         ++pointer;
         right_pwm = static_cast<uint8_t>(strtol(pointer, &pointer, 10));
+        right_pid_enabled = false;  // manual override disables PID for that wheel
 
         while (*pointer && *pointer != 'D')
             ++pointer;
     }
 
-    // Parse directions
+    // Parse directions (legacy)
     if (*pointer == 'D')
     {
         ++pointer;
@@ -835,12 +984,15 @@ void processSerialCommand()
         }
     }
 
-    // Constrain PWM values and apply to motors
+    // Constrain PWM values and apply to motors (legacy manual mode)
     left_pwm = constrain(left_pwm, 0, UINT8_MAX);
     right_pwm = constrain(right_pwm, 0, UINT8_MAX);
 
-    analogWrite_direct(LEFT_PWM_PIN, left_pwm);
-    analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
+    // Apply manual PWM outputs only if PID is not enabled for that wheel
+    if (!left_pid_enabled)
+        analogWrite_direct(LEFT_PWM_PIN, left_pwm);
+    if (!right_pid_enabled)
+        analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
 }
 
 // ============================================================================
@@ -939,9 +1091,164 @@ void serial_print_telemetry()
     Serial.println(ekf_frequency);
 }
 
+/**
+ * @brief Prints telemetry data for Teleplot visualization and debugging
+ */
+void serial_print_minimum_telemetry()
+{
+    const StateVector & left_state = left_kalman.get_state_vector();
+    const StateVector & right_state = right_kalman.get_state_vector();
+
+    // Calculate filter frequencies
+    static int adc_frequency = 0;
+    static int ekf_frequency = 0;
+    calculate_frequency(adc_frequency, ekf_frequency);
+
+    // left wheel data
+    const float left_rpm = left_state[1] * RAD_S_TO_RPM;
+
+    // right wheel data
+    const float right_rpm = right_state[1] * RAD_S_TO_RPM;
+
+    // Speed data
+    Serial.print(">Lrpm:");
+    Serial.println(left_rpm, 4);
+    Serial.print(">Rrpm:");
+    Serial.println(right_rpm, 4);
+
+    // Frequency data
+    Serial.print(">Fekf:");
+    Serial.println(ekf_frequency);
+}
+
 // ============================================================================
 // ARDUINO MAIN FUNCTIONS
 // ============================================================================
+
+void apply_pid_control_once()
+{
+    const uint32_t now_us = micros();
+    float dt_pwm = 0.001f;
+    if (last_pwm_update_us != 0U)
+        dt_pwm = (now_us - last_pwm_update_us) / 1e3f;  // ms
+    last_pwm_update_us = now_us;
+
+    // LEFT
+    if (left_pid_enabled)
+    {
+        const StateVector & lstate = left_kalman.get_state_vector();
+        const float measured_rpm = lstate[1] * RAD_S_TO_RPM;
+
+        // feedforward (static friction compensation) -- signed
+        const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(left_target_rpm);
+
+        // Startup boost: if measured RPM is near zero and we have a non-zero target, give a short timed boost
+        static uint32_t left_boost_until_us = 0U;
+        const float stuck_rpm_thresh = 1.0f;  // rpm threshold to consider "not moving"
+        if (fabsf(measured_rpm) < stuck_rpm_thresh && fabsf(left_target_rpm) > 0.5f)
+        {
+            // request a boost for a short window
+            left_boost_until_us = now_us + 150000UL;  // 150 ms
+        }
+
+        float ff_total = ff_pwm;
+        if (now_us < left_boost_until_us)
+        {
+            // additional boost
+            ff_total = signf(left_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
+        }
+
+        // Determine if current actuator appears saturated (simple: last pwm at limit)
+        bool left_saturated = (left_pwm >= 255U);
+
+        // update PID: include ff_total in the update call for anti-windup logic
+        const float u = left_pid.update(left_target_rpm, measured_rpm, ff_total, left_saturated);
+
+        // compute pwm candidate
+        float pwr = fabsf(u);
+        if (pwr > 255.0f)
+            pwr = 255.0f;
+
+        int dir = (u >= 0.0f) ? 1 : -1;
+
+        // slew-rate limit pwm change
+        float max_delta = PWM_SLEW_RATE_PER_MS * dt_pwm;
+        float desired_pwm = pwr;
+        float pwm_diff = desired_pwm - static_cast<float>(left_pwm);
+        if (pwm_diff > max_delta)
+            desired_pwm = left_pwm + max_delta;
+        else if (pwm_diff < -max_delta)
+            desired_pwm = left_pwm - max_delta;
+
+        // write direction and pwm
+        left_direction = static_cast<int8_t>(dir);
+        if (dir == 1)
+            digitalWrite_direct(LEFT_DIR_PIN, LOW);
+        else
+            digitalWrite_direct(LEFT_DIR_PIN, HIGH);
+
+        left_pwm = static_cast<uint8_t>(constrain(static_cast<int>(desired_pwm), 0, 255));
+        analogWrite_direct(LEFT_PWM_PIN, left_pwm);
+    }
+
+    // Right wheel
+    if (right_pid_enabled)
+    {
+        const StateVector & rstate = right_kalman.get_state_vector();
+        const float measured_rpm = rstate[1] * RAD_S_TO_RPM;
+
+        // feedforward (static friction compensation) -- signed
+        const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(right_target_rpm);
+
+        // Startup boost: if measured RPM is near zero and we have a non-zero target, give a short timed boost
+        static uint32_t right_boost_until_us = 0U;
+        const float stuck_rpm_thresh = 1.0f;  // rpm threshold to consider "not moving"
+        if (fabsf(measured_rpm) < stuck_rpm_thresh && fabsf(right_target_rpm) > 0.5f)
+        {
+            // request a boost for a short window
+            right_boost_until_us = now_us + 150000UL;  // 150 ms
+        }
+
+        float ff_total = ff_pwm;
+        if (now_us < right_boost_until_us)
+        {
+            // additional boost
+            ff_total = signf(right_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
+        }
+
+        // Determine if current actuator appears saturated (simple: last pwm at limit)
+        bool right_saturated = (right_pwm >= 255U);
+
+        // update PID: include ff_total in the update call for anti-windup logic
+        const float u = right_pid.update(right_target_rpm, measured_rpm, ff_total, right_saturated);
+
+        // compute pwm candidate
+        float pwr = fabsf(u);
+        if (pwr > 255.0f)
+            pwr = 255.0f;
+
+        int dir = (u >= 0.0f) ? 1 : -1;
+
+        // slew-rate limit pwm change
+        float max_delta = PWM_SLEW_RATE_PER_MS * dt_pwm;
+        float desired_pwm = pwr;
+        float pwm_diff = desired_pwm - static_cast<float>(right_pwm);
+        if (pwm_diff > max_delta)
+            desired_pwm = right_pwm + max_delta;
+        else if (pwm_diff < -max_delta)
+            desired_pwm = right_pwm - max_delta;
+
+        // write direction and pwm
+        right_direction = static_cast<int8_t>(dir);
+        if (dir == 1)
+            digitalWrite_direct(RIGHT_DIR_PIN, HIGH);
+        else
+            digitalWrite_direct(RIGHT_DIR_PIN, LOW);
+
+        right_pwm = static_cast<uint8_t>(constrain(static_cast<int>(desired_pwm), 0, 255));
+        analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
+    }
+}
 
 void setup()
 {
@@ -956,6 +1263,7 @@ void setup()
     Serial.println("Teleplot: arduino telemetry");
     Serial.println("Send commands: L<pwm>R<pwm>D<left_dir><right_dir>");
     Serial.println("Example: L128R255D11");
+    Serial.println("Set RPM targets: T<left_rpm>,<right_rpm>  (example: T120,90)");
 
     // Start ADC free-running mode
     setup_adc_free_running();
@@ -966,15 +1274,23 @@ void setup()
 
 void loop()
 {
-    // Main processing pipeline
+    // Update encoders and EKF
     update_encoder_and_ekf();
+
+    // Service serial (may set targets or manual PWM)
     readSerialData();
     processSerialCommand();
 
+    // Apply PID outputs if enabled (overrides manual PWM for those wheels)
+    apply_pid_control_once();
+
 #if TELEMETRY
     static uint32_t last_telemetry_time = 0U;
-
     if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
         serial_print_telemetry();
+#else
+    static uint32_t last_telemetry_time = 0U;
+    if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
+        serial_print_minimum_telemetry();
 #endif
 }
