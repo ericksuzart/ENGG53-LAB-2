@@ -7,6 +7,8 @@
 #undef min
 #undef max
 
+#include <FastPID.h>  // Include FastPID library
+
 #include <vt_kalman>
 #include <vt_linalg>
 
@@ -67,9 +69,17 @@ constexpr uint32_t INITIAL_DELAY_MS = 100U;
 constexpr uint16_t LOOP_DELAY_MICROS = 10U;
 constexpr uint32_t FREQ_CALC_INTERVAL_MS = 1000U;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200U;  // 5Hz
-constexpr uint32_t STUCK_THRESHOLD_MS = 5000U;    // 5 seconds
+constexpr uint32_t STUCK_THRESHOLD_MS = 2000U;    // 5 seconds
 constexpr uint32_t MICROSECONDS_PER_SECOND = 1000000UL;
 constexpr uint32_t MILLISECONDS_PER_SECOND = 1000UL;
+
+// PID control constants
+constexpr uint32_t PID_UPDATE_RATE_HZ = 100U;  // 100 Hz PID update
+constexpr uint32_t PID_UPDATE_INTERVAL_US = MICROSECONDS_PER_SECOND / PID_UPDATE_RATE_HZ;
+volatile uint32_t pid_update_counter = 0U;
+uint32_t last_pid_count = 0U;
+uint32_t last_pid_freq_time = 0U;
+int pid_actual_frequency = 0;
 
 // Additional constants
 constexpr float HALF = 0.5F;
@@ -128,6 +138,19 @@ int8_t right_direction = 1;  // 1 for forward, -1 for backward
 std::array<char, SERIAL_BUFFER_SIZE> serialBuffer;
 uint8_t serialIndex = 0U;
 bool newCommand = false;
+
+// PID control
+volatile float left_target_rpm = 0.0F;
+volatile float right_target_rpm = 0.0F;
+volatile bool left_pid_enabled = false;
+volatile bool right_pid_enabled = false;
+
+// FastPID instances
+FastPID left_fast_pid;
+FastPID right_fast_pid;
+
+// PID timing
+volatile bool pid_update_flag = false;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -490,99 +513,46 @@ WheelKalmanState left_kalman;
 WheelKalmanState right_kalman;
 
 // ============================================================================
-// PID controller implementation
+// TIMER INTERRUPT SETUP FOR PID CONTROL
 // ============================================================================
 
-struct PIDController
+/**
+ * @brief Setup Timer2 for PID control interrupt
+ */
+void setup_pid_timer()
 {
-    float kp;
-    float ki;
-    float kd;
+    // Disable interrupts during configuration
+    cli();
 
-    float integral;
-    float prev_error;
-    uint32_t last_time_us;
+    // Configure Timer2 for 100Hz interrupts
+    TCCR2A = 0;  // Set entire TCCR2A register to 0
+    TCCR2B = 0;  // Same for TCCR2B
+    TCNT2 = 0;   // Initialize counter value to 0
 
-    float integral_min;
-    float integral_max;
+    // Set compare match register for 100Hz increments
+    // OCR2A = (F_CPU / (prescaler * frequency)) - 1
+    // Using 1024 prescaler: 16MHz / (1024 * 100Hz) - 1 = 155.25 ~ 155
+    OCR2A = 155;
 
-    PIDController()
-    : kp(2.0F),
-      ki(0.5F),
-      kd(0.0F),
-      integral(0.0F),
-      prev_error(0.0F),
-      last_time_us(0U),
-      integral_min(-1000.0F),
-      integral_max(1000.0F)
-    {
-    }
+    // Turn on CTC mode
+    TCCR2A |= (1 << WGM21);
+    // Set CS22 and CS20 bits for 1024 prescaler
+    TCCR2B |= (1 << CS22) | (1 << CS21) | (1 << CS20);
+    // Enable timer compare interrupt
+    TIMSK2 |= (1 << OCIE2A);
 
-    void reset()
-    {
-        integral = 0.0F;
-        prev_error = 0.0F;
-        last_time_us = 0U;
-    }
+    // Enable global interrupts
+    sei();
+}
 
-    /**
-     * @brief Compute control signal (units: same as u — we'll use it to produce PWM)
-     * @param target target RPM (signed: sign encodes direction)
-     * @param measurement measured RPM (signed)
-     * @return control output (signed). We'll map absolute value -> pwm (0..255), sign -> direction
-     */
-    float update(float target, float measurement, float ff_compensation, bool is_actuator_saturated)
-    {
-        const uint32_t now = micros();
-        float dt = 0.001f;
-        if (last_time_us != 0U)
-        {
-            dt = (static_cast<float>(now - last_time_us)) / 1e6f;
-            if (dt <= 0.0f)
-                dt = 0.001f;
-        }
-        last_time_us = now;
-
-        const float error = target - measurement;
-
-        // derivative from error (error is on RPM, measurement is EKF filtered)
-        const float derivative = (error - prev_error) / dt;
-
-        // Anti-windup: only integrate if output not saturated OR error is reducing
-        // is_actuator_saturated true = actuator capped at output; don't integrate in that case unless error sign
-        // matches correction
-        bool allow_integration = !is_actuator_saturated;
-        if (!allow_integration)
-        {
-            // allow integration if the integrator would help reduce the saturation (simple heuristic)
-            float u_no_i = kp * error + kd * derivative + ff_compensation;
-            if (signf(u_no_i) == signf(error))
-                allow_integration = true;
-        }
-
-        if (allow_integration)
-        {
-            integral += error * dt;
-            if (integral > integral_max)
-                integral = integral_max;
-            else if (integral < integral_min)
-                integral = integral_min;
-        }
-
-        prev_error = error;
-        const float u = kp * error + ki * integral + kd * derivative + ff_compensation;
-        return u;
-    }
-};
-
-// Per-wheel PID instances and control flags
-PIDController left_pid;
-PIDController right_pid;
-
-volatile float left_target_rpm = 0.0F;
-volatile float right_target_rpm = 0.0F;
-volatile bool left_pid_enabled = false;
-volatile bool right_pid_enabled = false;
+/**
+ * @brief Timer2 compare match interrupt service routine
+ */
+ISR(TIMER2_COMPA_vect)
+{
+    pid_update_flag = true;
+    pid_update_counter++;
+}
 
 // ============================================================================
 // HARDWARE ABSTRACTION LAYER
@@ -820,6 +790,31 @@ void calculate_frequency(int & adc_frequency, int & ekf_frequency)
 }
 
 /**
+ * @brief Calculates actual PID update frequency
+ */
+void calculate_pid_frequency()
+{
+    const uint32_t current_time = millis();
+    const uint32_t elapsed_time = current_time - last_pid_freq_time;
+
+    if (elapsed_time >= FREQ_CALC_INTERVAL_MS)
+    {
+        uint32_t current_pid_count;
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+        {
+            current_pid_count = pid_update_counter;
+        }
+
+        const uint32_t pid_diff = current_pid_count - last_pid_count;
+        pid_actual_frequency = (pid_diff * 1000U + elapsed_time / 2U) / elapsed_time;
+
+        // Reset counters for next calculation
+        last_pid_count = current_pid_count;
+        last_pid_freq_time = current_time;
+    }
+}
+
+/**
  * @brief Processes encoder data and updates Kalman filters for both wheels
  */
 void update_encoder_and_ekf()
@@ -922,9 +917,9 @@ void processSerialCommand()
             left_pid_enabled = true;
             right_pid_enabled = true;
 
-            // reset integrator/derivative history to avoid big jumps
-            left_pid.reset();
-            right_pid.reset();
+            // reset PID controllers to avoid big jumps
+            left_fast_pid.clear();
+            right_fast_pid.clear();
         }
         // done processing T-command
         return;
@@ -1009,10 +1004,11 @@ void serial_print_telemetry()
     const StateVector & left_state = left_kalman.get_state_vector();
     const StateVector & right_state = right_kalman.get_state_vector();
 
-    // Calculate filter frequencies
+    // Calculate frequencies
     static int adc_frequency = 0;
     static int ekf_frequency = 0;
     calculate_frequency(adc_frequency, ekf_frequency);
+    calculate_pid_frequency();
 
     // left wheel data
     const float left_encoder_rad = static_cast<float>(left_enc_count) * RADIANS_PER_COUNT;
@@ -1089,10 +1085,12 @@ void serial_print_telemetry()
     Serial.println(adc_frequency);
     Serial.print(">Fekf:");
     Serial.println(ekf_frequency);
+    Serial.print(">Fpid:");
+    Serial.println(pid_actual_frequency);
 }
 
 /**
- * @brief Prints telemetry data for Teleplot visualization and debugging
+ * @brief Prints minimum telemetry data
  */
 void serial_print_minimum_telemetry()
 {
@@ -1103,6 +1101,7 @@ void serial_print_minimum_telemetry()
     static int adc_frequency = 0;
     static int ekf_frequency = 0;
     calculate_frequency(adc_frequency, ekf_frequency);
+    calculate_pid_frequency();  // Calculate PID frequency
 
     // left wheel data
     const float left_rpm = left_state[1] * RAD_S_TO_RPM;
@@ -1119,6 +1118,8 @@ void serial_print_minimum_telemetry()
     // Frequency data
     Serial.print(">Fekf:");
     Serial.println(ekf_frequency);
+    Serial.print(">Fpid:");
+    Serial.println(pid_actual_frequency);
 }
 
 // ============================================================================
@@ -1139,6 +1140,10 @@ void apply_pid_control_once()
         const StateVector & lstate = left_kalman.get_state_vector();
         const float measured_rpm = lstate[1] * RAD_S_TO_RPM;
 
+        // Convert RPM to PID input (scaled for better resolution)
+        const int16_t target_pid = static_cast<int16_t>(left_target_rpm * 10.0f);  // Scale by 10 for more resolution
+        const int16_t measured_pid = static_cast<int16_t>(measured_rpm * 10.0f);
+
         // feedforward (static friction compensation) -- signed
         const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(left_target_rpm);
 
@@ -1158,11 +1163,11 @@ void apply_pid_control_once()
             ff_total = signf(left_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
         }
 
-        // Determine if current actuator appears saturated (simple: last pwm at limit)
-        bool left_saturated = (left_pwm >= 255U);
+        // Get PID output
+        int16_t pid_output = left_fast_pid.step(target_pid, measured_pid);
 
-        // update PID: include ff_total in the update call for anti-windup logic
-        const float u = left_pid.update(left_target_rpm, measured_rpm, ff_total, left_saturated);
+        // Convert PID output back to PWM scale and add feedforward
+        float u = static_cast<float>(pid_output) / 10.0f + ff_total;  // Scale down since we scaled up input
 
         // compute pwm candidate
         float pwr = fabsf(u);
@@ -1197,6 +1202,10 @@ void apply_pid_control_once()
         const StateVector & rstate = right_kalman.get_state_vector();
         const float measured_rpm = rstate[1] * RAD_S_TO_RPM;
 
+        // Convert RPM to PID input (scaled for better resolution)
+        const int16_t target_pid = static_cast<int16_t>(right_target_rpm * 10.0f);  // Scale by 10 for more resolution
+        const int16_t measured_pid = static_cast<int16_t>(measured_rpm * 10.0f);
+
         // feedforward (static friction compensation) -- signed
         const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(right_target_rpm);
 
@@ -1216,11 +1225,11 @@ void apply_pid_control_once()
             ff_total = signf(right_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
         }
 
-        // Determine if current actuator appears saturated (simple: last pwm at limit)
-        bool right_saturated = (right_pwm >= 255U);
+        // Get PID output
+        int16_t pid_output = right_fast_pid.step(target_pid, measured_pid);
 
-        // update PID: include ff_total in the update call for anti-windup logic
-        const float u = right_pid.update(right_target_rpm, measured_rpm, ff_total, right_saturated);
+        // Convert PID output back to PWM scale and add feedforward
+        float u = static_cast<float>(pid_output) / 10.0f + ff_total;  // Scale down since we scaled up input
 
         // compute pwm candidate
         float pwr = fabsf(u);
@@ -1265,11 +1274,28 @@ void setup()
     Serial.println("Example: L128R255D11");
     Serial.println("Set RPM targets: T<left_rpm>,<right_rpm>  (example: T120,90)");
 
+    // Configure FastPID controllers
+    // Parameters: kp, ki, kd, hz, bits, sign
+    left_fast_pid.configure(3.0, 1.0, 0.0, PID_UPDATE_RATE_HZ, 16, true);
+    right_fast_pid.configure(3.0, 1.0, 0.0, PID_UPDATE_RATE_HZ, 16, true);
+
+    // Set output range for PID (scaled by 10 for better resolution)
+    left_fast_pid.setOutputRange(-2550, 2550);  // -255 to 255 scaled by 10
+    right_fast_pid.setOutputRange(-2550, 2550);
+
     // Start ADC free-running mode
     setup_adc_free_running();
 
+    // Setup PID timer interrupt
+    setup_pid_timer();
+
     // Allow time for ADC stabilization
     delay(INITIAL_DELAY_MS);
+
+    // right_pid_enabled = true;
+    // left_target_rpm = 20.0f;
+    // right_target_rpm = 20.0f;
+    // left_pid_enabled = true;
 }
 
 void loop()
@@ -1281,8 +1307,12 @@ void loop()
     readSerialData();
     processSerialCommand();
 
-    // Apply PID outputs if enabled (overrides manual PWM for those wheels)
-    apply_pid_control_once();
+    // Apply PID outputs if enabled and timer flag is set
+    if (pid_update_flag)
+    {
+        apply_pid_control_once();
+        pid_update_flag = false;
+    }
 
 #if TELEMETRY
     static uint32_t last_telemetry_time = 0U;
