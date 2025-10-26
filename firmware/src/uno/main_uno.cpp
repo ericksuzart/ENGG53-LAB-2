@@ -15,8 +15,8 @@
 
 // Encoder has 8 white sections and 8 cutouts, producing 16 transitions per revolution
 constexpr int ENCODER_COUNTS_PER_REVOLUTION = 16;
-constexpr float RADIANS_PER_COUNT = 2.0F * PI / static_cast<float>(ENCODER_COUNTS_PER_REVOLUTION);
-constexpr uint8_t MIN_SAMPLE_COUNT = 50U;  // Minimum samples for encoder threshold calibration
+constexpr float RADIANS_PER_COUNT = TWO_PI / static_cast<float>(ENCODER_COUNTS_PER_REVOLUTION);
+constexpr float RAD_S_TO_RPM = 60.0F / (TWO_PI);
 
 // Kalman filter dimensions
 constexpr int STATE_DIM = 3;    // [angle, velocity, acceleration]
@@ -56,14 +56,17 @@ constexpr float STATIC_FRICTION_COEFFICIENT = 5.0F;  // tune needed
 constexpr float VELOCITY_THRESHOLD = 0.1F;
 
 // Timing constants
-constexpr float MIN_DELTA_TIME = 0.001F;
-constexpr float MAX_DELTA_TIME = 0.1F;
-constexpr float INITIAL_DELTA_TIME = 0.01F;
+#if TELEMETRY
+constexpr float MAX_DT = 0.02F;
+#else
+constexpr float MAX_DT = 0.0065F;
+#endif
+constexpr float MIN_DT = 0.001F;
 constexpr uint32_t INITIAL_DELAY_MS = 100U;
 constexpr uint16_t LOOP_DELAY_MICROS = 10U;
 constexpr uint32_t FREQ_CALC_INTERVAL_MS = 1000U;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200U;  // 5Hz
-constexpr uint32_t STUCK_THRESHOLD_MS = 10000U;   // 10 seconds
+constexpr uint32_t STUCK_THRESHOLD_MS = 5000U;    // 5 seconds
 constexpr uint32_t MICROSECONDS_PER_SECOND = 1000000UL;
 constexpr uint32_t MILLISECONDS_PER_SECOND = 1000UL;
 
@@ -151,6 +154,14 @@ inline float normalize_angle(float angle)
 bool nonBlockingDelay(uint32_t & last_time, const uint32_t & ms_delay)
 {
     const uint32_t current_time = millis();
+
+    // Handle timer overflow
+    if (current_time > last_time)
+    {
+        last_time = current_time;
+        return true;
+    }
+
     if (current_time - last_time >= ms_delay)
     {
         last_time = current_time;
@@ -190,7 +201,7 @@ class WheelKalmanState
 
    public:
     WheelKalmanState()
-    : state_vector_(create_zero_vector()),
+    : state_vector_(vt::numeric_vector<STATE_DIM>(0.0F)),
       filter_(state_transition_function, state_transition_jacobian, measurement_function, measurement_jacobian,
               process_noise_covariance_, measurement_noise_covariance_, state_vector_)
     {
@@ -202,19 +213,6 @@ class WheelKalmanState
     uint32_t get_last_update_us() const { return last_update_us_; }
 
     /**
-     * @brief Creates a zero-initialized state vector
-     */
-    static StateVector create_zero_vector()
-    {
-        StateVector vector;
-
-        for (unsigned int i = 0U; i < STATE_DIM; ++i)
-            vector[i] = 0.0F;
-
-        return vector;
-    }
-
-    /**
      * @brief State transition function
      */
     /**
@@ -223,7 +221,7 @@ class WheelKalmanState
     static StateVector state_transition_function(const StateVector & prev_state, const ControlVector & control_input)
     {
         // Unpack control vector
-        const float delta_time = control_input[0];
+        const float dt = control_input[0];
         const float pwm_command = control_input[1];
         const float direction_command = control_input[2];
 
@@ -232,7 +230,7 @@ class WheelKalmanState
         const float current_velocity = prev_state[1];
         const float current_acceleration = prev_state[2];  // Used for position integration
 
-        const float half_delta_time_squared = HALF * delta_time * delta_time;
+        const float half_dt_squared = HALF * dt * dt;
 
         // Is the motor being commanded to move above the static friction threshold?
         const bool is_commanded = pwm_command > STATIC_FRICTION_THRESHOLD;
@@ -281,10 +279,10 @@ class WheelKalmanState
         StateVector next_state;
 
         // p_k = p_k-1 + v_k-1*dt + 0.5*a_k-1*dt^2
-        next_state[0] = current_angle + delta_time * current_velocity + half_delta_time_squared * current_acceleration;
+        next_state[0] = current_angle + dt * current_velocity + half_dt_squared * current_acceleration;
 
         // v_k = v_k-1 + a_k*dt (Uses the *new* modeled acceleration)
-        next_state[1] = current_velocity + delta_time * modeled_acceleration;
+        next_state[1] = current_velocity + dt * modeled_acceleration;
 
         // a_k = a_k (The new acceleration is the one we just modeled)
         next_state[2] = modeled_acceleration;
@@ -298,7 +296,7 @@ class WheelKalmanState
     static vt::numeric_matrix<STATE_DIM, STATE_DIM> state_transition_jacobian(const StateVector & state,
                                                                               const ControlVector & control)
     {
-        const float delta_time = control[0];
+        const float dt = control[0];
         const float pwm_command = control[1];
         const float direction_command = control[2];
         const float current_velocity = state[1];
@@ -308,8 +306,8 @@ class WheelKalmanState
 
         // Position derivatives
         jacobian(0, 0) = 1.0F;
-        jacobian(0, 1) = delta_time;
-        jacobian(0, 2) = HALF * delta_time * delta_time;
+        jacobian(0, 1) = dt;
+        jacobian(0, 2) = HALF * dt * dt;
 
         // --- LOGIC FOR DERIVATIVES (SHARED BETWEEN VELOCITY AND ACCELERATION) ---
         const bool is_potentially_stuck =
@@ -338,7 +336,7 @@ class WheelKalmanState
         jacobian(1, 0) = 0.0F;
         // v_k = v_k-1 + dt * a_k-1(v_k-1, ...)
         // dVel_k / dVel_k-1 = 1 + dt * (dAcc_dVel)
-        jacobian(1, 1) = 1.0F + delta_time * dAcc_dVel;
+        jacobian(1, 1) = 1.0F + dt * dAcc_dVel;
         jacobian(1, 2) = 0.0F;  // Model assumes acceleration doesn't depend on last acceleration
 
         // Acceleration derivatives (dAcc_k / dState_k-1)
@@ -436,59 +434,45 @@ class WheelKalmanState
     {
         ekf_filter_update_count++;
 
-        float delta_time =
-          static_cast<float>(current_time - last_update_us_) / static_cast<float>(MICROSECONDS_PER_SECOND);
+        float dt = static_cast<float>(current_time - last_update_us_) / static_cast<float>(MICROSECONDS_PER_SECOND);
 
-        // Ensure reasonable time delta
-        if (delta_time > MAX_DELTA_TIME)
-            delta_time = INITIAL_DELTA_TIME;
-
-        else if (delta_time < MIN_DELTA_TIME)
-            delta_time = MIN_DELTA_TIME;
+        // Ensure reasonable time delta for stability
+        dt = constrain(dt, MIN_DT, MAX_DT);
 
         if (!initialized_)
         {
-            // Initialize filter with proper continuous angle
+            // Initialize filter
             state_vector_[0] = normalize_angle_with_continuity(measured_angle);
             state_vector_[1] = 0.0F;
             state_vector_[2] = 0.0F;
             last_update_us_ = current_time;
             initialized_ = true;
+            return;
         }
-        else
-        {
-            // Predict step
-            ControlVector control_input;
-            control_input[0] = delta_time;
-            control_input[1] = static_cast<float>(pwm_value);
-            control_input[2] = static_cast<float>(direction_value);
 
-            filter_.predict(control_input);
+        // Predict
+        filter_.predict(ControlVector({dt, static_cast<float>(pwm_value), static_cast<float>(direction_value)}));
 
-            // Update step with normalized angle
-            const float continuous_angle = normalize_angle_with_continuity(measured_angle);
-            const float predicted_angle = filter_.state_vector[0];
+        // Update using continuous angle (same as you already do)
+        const float continuous_angle = normalize_angle_with_continuity(measured_angle);
+        const float predicted_angle = filter_.state_vector[0];
+        const float angle_diff = continuous_angle - predicted_angle;
+        const float innovation = normalize_angle(angle_diff);
+        const float corrected_prediction = predicted_angle + innovation;
 
-            // Calculate innovation using normalized difference
-            const float angle_diff = continuous_angle - predicted_angle;
-            const float innovation = normalize_angle(angle_diff);
-            const float corrected_measurement = predicted_angle + innovation;
+        filter_.update(MeasurementVector(corrected_prediction));
 
-            MeasurementVector measurement;
-            measurement[0] = corrected_measurement;
-            filter_.update(measurement);
-
-            last_update_us_ = current_time;
-        }
+        last_update_us_ = current_time;
     }
 };
 
-// Initialize static noise matrices
+// How much you trust the model. Lower values = more trust.
 const vt::numeric_matrix<STATE_DIM, STATE_DIM> WheelKalmanState::process_noise_covariance_ =
-  vt::numeric_matrix<STATE_DIM, STATE_DIM>::diagonals({0.001F, 0.1F, 1.0F});
+  vt::numeric_matrix<STATE_DIM, STATE_DIM>::diagonals({0.001F, 0.5F, 5.0F});
 
+// How much you trust the sensor. Lower values = more trust.
 const vt::numeric_matrix<MEAS_DIM, MEAS_DIM> WheelKalmanState::measurement_noise_covariance_ =
-  vt::numeric_matrix<MEAS_DIM, MEAS_DIM>::diagonals(0.05F);
+  vt::numeric_matrix<MEAS_DIM, MEAS_DIM>::diagonals(10.0F);
 
 // Global Kalman filter instances
 WheelKalmanState left_kalman;
@@ -681,43 +665,16 @@ void process_encoder_data(volatile uint8_t & raw_value, uint8_t & min_val, uint8
 
     if (new_state != prev_state)
     {
+        // Encoder count only changes here
         enc_count += enc_direction;
         prev_state = new_state;
     }
 
-    // Calculate absolute angle from encoder count
-    const float measured_angle = static_cast<float>(enc_count) * RADIANS_PER_COUNT;
-
-    // Update movement detection
+    // Current time (microseconds)
     const uint32_t now = micros();
+    const float measured_angle = static_cast<float>(enc_count) * RADIANS_PER_COUNT;
     kalman.update_movement_detection(enc_count, now);
-
-    // Update Kalman filter
     kalman.update_filter(measured_angle, now, pwm_value, enc_direction);
-}
-
-/**
- * @brief Processes encoder data and updates Kalman filters for both wheels
- */
-void update_encoder_and_ekf()
-{
-    // Process left encoder data
-    if (new_left_data)
-    {
-        process_encoder_data(left_raw_value, left_min, left_max, left_sample_count, left_threshold, left_prev_state,
-                             left_enc_count, left_direction, left_kalman, left_pwm);
-        new_left_data = false;
-    }
-
-    // Process right encoder data
-    if (new_right_data)
-    {
-        process_encoder_data(right_raw_value, right_min, right_max, right_sample_count, right_threshold,
-                             right_prev_state, right_enc_count, right_direction, right_kalman, right_pwm);
-        new_right_data = false;
-    }
-
-    update_dynamic_thresholds();
 }
 
 /**
@@ -754,6 +711,30 @@ void calculate_frequency(int & adc_frequency, int & ekf_frequency)
         last_filter_count = filter_count;
         last_time = current_time;
     }
+}
+
+/**
+ * @brief Processes encoder data and updates Kalman filters for both wheels
+ */
+void update_encoder_and_ekf()
+{
+    // Process left encoder data
+    if (new_left_data)
+    {
+        process_encoder_data(left_raw_value, left_min, left_max, left_sample_count, left_threshold, left_prev_state,
+                             left_enc_count, left_direction, left_kalman, left_pwm);
+        new_left_data = false;
+    }
+
+    // Process right encoder data
+    if (new_right_data)
+    {
+        process_encoder_data(right_raw_value, right_min, right_max, right_sample_count, right_threshold,
+                             right_prev_state, right_enc_count, right_direction, right_kalman, right_pwm);
+        new_right_data = false;
+    }
+
+    update_dynamic_thresholds();
 }
 
 // ============================================================================
@@ -855,8 +836,8 @@ void processSerialCommand()
     }
 
     // Constrain PWM values and apply to motors
-    left_pwm = constrain(left_pwm, 0, 255);
-    right_pwm = constrain(right_pwm, 0, 255);
+    left_pwm = constrain(left_pwm, 0, UINT8_MAX);
+    right_pwm = constrain(right_pwm, 0, UINT8_MAX);
 
     analogWrite_direct(LEFT_PWM_PIN, left_pwm);
     analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
@@ -884,7 +865,7 @@ void serial_print_telemetry()
     // left wheel data
     const float left_encoder_rad = static_cast<float>(left_enc_count) * RADIANS_PER_COUNT;
     const float left_filter_angle_rad = left_state[0];
-    const float left_rpm = (left_state[1] * 60.0F) / TWO_PI;
+    const float left_rpm = left_state[1] * RAD_S_TO_RPM;
     const bool is_left_stuck = left_kalman.is_stuck(current_time);
     const float left_pwm_norm = static_cast<float>(left_pwm) / 255.0f;
     const int left_enc_state = left_prev_state ? left_max : left_min;
@@ -892,7 +873,7 @@ void serial_print_telemetry()
     // right wheel data
     const float right_encoder_rad = static_cast<float>(right_enc_count) * RADIANS_PER_COUNT;
     const float right_filter_angle_rad = right_state[0];
-    const float right_rpm = (right_state[1] * 60.0F) / TWO_PI;
+    const float right_rpm = right_state[1] * RAD_S_TO_RPM;
     const bool is_right_stuck = right_kalman.is_stuck(current_time);
     const float right_pwm_norm = static_cast<float>(right_pwm) / 255.0f;
     const int right_enc_state = right_prev_state ? right_max : right_min;
@@ -995,5 +976,5 @@ void loop()
 
     if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
         serial_print_telemetry();
-#endif  // TELEMETRY
+#endif
 }
