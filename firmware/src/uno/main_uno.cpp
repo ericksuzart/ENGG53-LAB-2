@@ -1,4 +1,5 @@
 #include <ArduinoSTL.h>
+#include <avr/io.h>  // Include for direct port manipulation
 #include <util/atomic.h>
 
 #include <array>
@@ -16,6 +17,16 @@
 // CONSTANTS AND CONFIGURATION
 // ============================================================================
 
+// --- AVR Pin Definitions (for clarity) ---
+// Pin 5 = PD5 (OC0B)
+// Pin 6 = PD6 (OC0A)
+// Pin 7 = PD7
+// Pin 8 = PB0
+constexpr uint8_t LEFT_PWM_PIN_REG = 6;   // Mapped to OCR0A
+constexpr uint8_t LEFT_DIR_PIN_REG = 8;   // Mapped to PB0
+constexpr uint8_t RIGHT_PWM_PIN_REG = 5;  // Mapped to OCR0B
+constexpr uint8_t RIGHT_DIR_PIN_REG = 7;  // Mapped to PD7
+
 // Encoder has 8 white sections and 8 cutouts, producing 16 transitions per revolution
 constexpr int ENCODER_COUNTS_PER_REVOLUTION = 16;
 constexpr float RADIANS_PER_COUNT = TWO_PI / static_cast<float>(ENCODER_COUNTS_PER_REVOLUTION);
@@ -31,55 +42,52 @@ constexpr int SERIAL_BUFFER_SIZE = 32;
 constexpr int SERIAL_TIMEOUT_MS = 100;
 
 // Motor interface pins
-constexpr int LEFT_PWM_PIN = 6;
-constexpr int LEFT_DIR_PIN = 8;
 constexpr int LEFT_ENC_PIN = 0;
-
-constexpr int RIGHT_PWM_PIN = 5;
-constexpr int RIGHT_DIR_PIN = 7;
 constexpr int RIGHT_ENC_PIN = 1;
 
 // ADC constants
 constexpr uint8_t ADC_MAX_VALUE = 255U;
 constexpr uint8_t ADC_INITIAL_THRESHOLD = 128U;
 constexpr uint8_t PIN_MASK = 0x07U;
-constexpr uint8_t MAX_PIN_GROUP_1 = 7U;
-constexpr uint8_t MAX_PIN_GROUP_2 = 13U;
-constexpr uint8_t MAX_PIN_GROUP_3 = 19U;
 
 // Motor model constants
 constexpr float PWM_TO_ACCELERATION_GAIN = 0.01F;
-constexpr float FRICTION_COEFFICIENT = 0.003F;
-constexpr float STATIC_FRICTION_THRESHOLD = 140.0F;
-constexpr float STUCK_VELOCITY_THRESHOLD = 0.05F;
 constexpr float MAX_ACCELERATION = 200.0F;
 constexpr float MIN_ACCELERATION = -200.0F;
-constexpr float BRAKING_COEFFICIENT = 10.0F;         // tune needed
-constexpr float STATIC_FRICTION_COEFFICIENT = 5.0F;  // tune needed
-constexpr float VELOCITY_THRESHOLD = 0.1F;
+
+constexpr float BRAKING_COEFFICIENT = 5.0F;        // tune needed
+constexpr float FRICTION_COEFFICIENT = 0.003F;
+constexpr float STATIC_FRICTION_THRESHOLD = 175.0F;
+constexpr float STUCK_VELOCITY_THRESHOLD = 0.05F;
+constexpr float STUCK_DAMPING_COEFFICIENT = 10.0F;
+constexpr float VELOCITY_THRESHOLD = 0.5F;
+constexpr float ZERO_RPM_THRESHOLD = VELOCITY_THRESHOLD * RAD_S_TO_RPM;
 
 // Timing constants
 #if TELEMETRY
-constexpr float MAX_DT = 0.02F;
+constexpr float MAX_DT = 0.013F;
 #else
 constexpr float MAX_DT = 0.0065F;
 #endif
 constexpr float MIN_DT = 0.001F;
 constexpr uint32_t INITIAL_DELAY_MS = 100U;
-constexpr uint16_t LOOP_DELAY_MICROS = 10U;
 constexpr uint32_t FREQ_CALC_INTERVAL_MS = 1000U;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200U;  // 5Hz
-constexpr uint32_t STUCK_THRESHOLD_MS = 2000U;    // 5 seconds
+constexpr uint32_t STUCK_THRESHOLD_MS = 5000U;    // 5 seconds
 constexpr uint32_t MICROSECONDS_PER_SECOND = 1000000UL;
 constexpr uint32_t MILLISECONDS_PER_SECOND = 1000UL;
 
 // PID control constants
-constexpr uint32_t PID_UPDATE_RATE_HZ = 100U;  // 100 Hz PID update
-constexpr uint32_t PID_UPDATE_INTERVAL_US = MICROSECONDS_PER_SECOND / PID_UPDATE_RATE_HZ;
-volatile uint32_t pid_update_counter = 0U;
-uint32_t last_pid_count = 0U;
-uint32_t last_pid_freq_time = 0U;
-int pid_actual_frequency = 0;
+constexpr uint32_t PID_UPDATE_RATE_HZ = 20U;  // 20 Hz PID update
+constexpr uint32_t PID_UPDATE_INTERVAL_MS = 1000U / PID_UPDATE_RATE_HZ;
+constexpr float MIN_TARGET_RPM = 10.0F;
+constexpr float MAX_TARGET_RPM = 50.0F;
+
+// PWM slew limiter
+constexpr float PWM_SLEW_RATE_PER_MS = 10.0f;    // max pwm change per millisecond (tune)
+constexpr float BOOST_MULTIPLIER = 1.1F;         // 1.1x the static friction threshold
+constexpr uint32_t BOOST_DURATION_US = 15000UL;  // 15 ms
+uint32_t last_pwm_update_us = 0U;
 
 // Additional constants
 constexpr float HALF = 0.5F;
@@ -98,18 +106,15 @@ using ControlVector = vt::numeric_vector<CONTROL_DIM>;
 // ============================================================================
 
 // --- Encoder ---
-
-volatile uint8_t current_channel = 0U;       // ADC channel being read
-volatile uint8_t left_raw_value = 0U;        // Latest ADC value for left encoder
-volatile uint8_t right_raw_value = 0U;       // Latest ADC value for right encoder
-volatile bool new_left_data = false;         // Flag for new left encoder data
-volatile bool new_right_data = false;        // Flag for new right encoder data
-volatile uint32_t adc_conversion_count = 0;  // ADC conversion count for frequency measurement
+volatile uint8_t current_channel = 0U;  // ADC channel being read
+volatile uint8_t left_raw_value = 0U;   // Latest ADC value for left encoder
+volatile uint8_t right_raw_value = 0U;  // Latest ADC value for right encoder
+volatile bool new_left_data = false;    // Flag for new left encoder data
+volatile bool new_right_data = false;   // Flag for new right encoder data
 
 // Tracking
 int32_t left_enc_count = 0U;
 int32_t right_enc_count = 0U;
-uint32_t ekf_filter_update_count = 0U;
 uint8_t left_prev_state = 0;
 uint8_t right_prev_state = 0;
 
@@ -123,16 +128,11 @@ uint8_t right_threshold = ADC_INITIAL_THRESHOLD;
 uint8_t left_sample_count = 0U;
 uint8_t right_sample_count = 0U;
 
-// --- Encoder ---
-
 // --- Motor control ---
-
 uint8_t left_pwm = 0U;
 uint8_t right_pwm = 0U;
 int8_t left_direction = 1;   // 1 for forward, -1 for backward
 int8_t right_direction = 1;  // 1 for forward, -1 for backward
-
-// --- Motor control ---
 
 // Serial communication
 std::array<char, SERIAL_BUFFER_SIZE> serialBuffer;
@@ -140,17 +140,25 @@ uint8_t serialIndex = 0U;
 bool newCommand = false;
 
 // PID control
-volatile float left_target_rpm = 0.0F;
-volatile float right_target_rpm = 0.0F;
-volatile bool left_pid_enabled = false;
-volatile bool right_pid_enabled = false;
+float left_target_rpm = 0.0F;
+float right_target_rpm = 0.0F;
+bool left_pid_enabled = false;
+bool right_pid_enabled = false;
+
+// Global PID gains
+float kp = 3.0F;
+float ki = 0.5F;
+float kd = 6.0F;
 
 // FastPID instances
 FastPID left_fast_pid;
 FastPID right_fast_pid;
 
 // PID timing
-volatile bool pid_update_flag = false;
+uint32_t last_pid_update_time = 0U;
+
+// Loop frequency calculation
+int frequency = 0;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -174,18 +182,11 @@ inline float normalize_angle(float angle)
  * @param last_time Pointer to last time reference
  * @param ms_delay Delay in milliseconds
  * @return true if delay completed, false otherwise
+ * @note This implementation correctly handles millis() overflow.
  */
-bool nonBlockingDelay(uint32_t & last_time, const uint32_t & ms_delay)
+inline bool nonBlockingDelay(uint32_t & last_time, const uint32_t & ms_delay)
 {
     const uint32_t current_time = millis();
-
-    // Handle timer overflow
-    if (current_time > last_time)
-    {
-        last_time = current_time;
-        return true;
-    }
-
     if (current_time - last_time >= ms_delay)
     {
         last_time = current_time;
@@ -199,10 +200,6 @@ static inline int signf(float x)
 {
     return (x > 0.0f) - (x < 0.0f);
 }
-
-// PWM slew limiter globals
-constexpr float PWM_SLEW_RATE_PER_MS = 100.0f;  // max pwm change per millisecond (tune)
-uint32_t last_pwm_update_us = 0U;
 
 // ============================================================================
 // KALMAN FILTER IMPLEMENTATION
@@ -246,9 +243,6 @@ class WheelKalmanState
     bool is_initialized() const { return initialized_; }
     uint32_t get_last_update_us() const { return last_update_us_; }
 
-    /**
-     * @brief State transition function
-     */
     /**
      * @brief State transition function
      */
@@ -297,7 +291,7 @@ class WheelKalmanState
         {
             // --- State 2: Stuck (Commanded but Not Moving) ---
             // Apply strong static friction to model the "stuck" state
-            modeled_acceleration = -current_velocity * STATIC_FRICTION_COEFFICIENT;
+            modeled_acceleration = -current_velocity * STUCK_DAMPING_COEFFICIENT;
         }
         else  // !is_commanded
         {
@@ -360,8 +354,7 @@ class WheelKalmanState
         else
         {
             if (is_potentially_stuck)
-                dAcc_dVel =
-                  -STATIC_FRICTION_COEFFICIENT;  // Strong static friction: a = -v * STATIC_FRICTION_COEFFICIENT
+                dAcc_dVel = -STUCK_DAMPING_COEFFICIENT;  // Strong static friction: a = -v * STUCK_DAMPING_COEFFICIENT
             else
                 dAcc_dVel = -(FRICTION_COEFFICIENT + 1.0F);  // Enhanced braking: a = -v * (FRICTION_COEFFICIENT + 1.0F)
         }
@@ -399,8 +392,6 @@ class WheelKalmanState
     {
         vt::numeric_matrix<MEAS_DIM, STATE_DIM> jacobian = {};
         jacobian(0, 0) = 1.0F;  // ∂measurement/∂position
-        // jacobian(0, 1) = 0.0F;  // ∂measurement/∂velocity
-        // jacobian(0, 2) = 0.0F;  // ∂measurement/∂acceleration
         return jacobian;
     }
 
@@ -466,8 +457,6 @@ class WheelKalmanState
      */
     void update_filter(float measured_angle, uint32_t current_time, int pwm_value, int direction_value)
     {
-        ekf_filter_update_count++;
-
         float dt = static_cast<float>(current_time - last_update_us_) / static_cast<float>(MICROSECONDS_PER_SECOND);
 
         // Ensure reasonable time delta for stability
@@ -487,7 +476,7 @@ class WheelKalmanState
         // Predict
         filter_.predict(ControlVector({dt, static_cast<float>(pwm_value), static_cast<float>(direction_value)}));
 
-        // Update using continuous angle (same as you already do)
+        // Update using continuous angle
         const float continuous_angle = normalize_angle_with_continuity(measured_angle);
         const float predicted_angle = filter_.state_vector[0];
         const float angle_diff = continuous_angle - predicted_angle;
@@ -512,157 +501,17 @@ const vt::numeric_matrix<MEAS_DIM, MEAS_DIM> WheelKalmanState::measurement_noise
 WheelKalmanState left_kalman;
 WheelKalmanState right_kalman;
 
-// ============================================================================
-// TIMER INTERRUPT SETUP FOR PID CONTROL
-// ============================================================================
-
-/**
- * @brief Setup Timer2 for PID control interrupt
- */
-void setup_pid_timer()
-{
-    // Disable interrupts during configuration
-    cli();
-
-    // Configure Timer2 for 100Hz interrupts
-    TCCR2A = 0;  // Set entire TCCR2A register to 0
-    TCCR2B = 0;  // Same for TCCR2B
-    TCNT2 = 0;   // Initialize counter value to 0
-
-    // Set compare match register for 100Hz increments
-    // OCR2A = (F_CPU / (prescaler * frequency)) - 1
-    // Using 1024 prescaler: 16MHz / (1024 * 100Hz) - 1 = 155.25 ~ 155
-    OCR2A = 155;
-
-    // Turn on CTC mode
-    TCCR2A |= (1 << WGM21);
-    // Set CS22 and CS20 bits for 1024 prescaler
-    TCCR2B |= (1 << CS22) | (1 << CS21) | (1 << CS20);
-    // Enable timer compare interrupt
-    TIMSK2 |= (1 << OCIE2A);
-
-    // Enable global interrupts
-    sei();
-}
-
-/**
- * @brief Timer2 compare match interrupt service routine
- */
-ISR(TIMER2_COMPA_vect)
-{
-    pid_update_flag = true;
-    pid_update_counter++;
-}
-
-// ============================================================================
-// HARDWARE ABSTRACTION LAYER
-// ============================================================================
-
-/**
- * @brief Direct pin mode configuration for performance
- */
-void pinMode_direct(uint8_t pin, uint8_t mode)
-{
-    if (pin <= MAX_PIN_GROUP_1)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (mode == OUTPUT)
-            DDRD |= bit_mask;
-        else
-            DDRD &= ~bit_mask;
-    }
-    else if (pin <= MAX_PIN_GROUP_2)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (mode == OUTPUT)
-            DDRB |= bit_mask;
-        else
-            DDRB &= ~bit_mask;
-    }
-    else if (pin <= MAX_PIN_GROUP_3)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (mode == OUTPUT)
-            DDRC |= bit_mask;
-        else
-            DDRC &= ~bit_mask;
-    }
-}
-
-/**
- * @brief Direct digital write for performance
- */
-void digitalWrite_direct(uint8_t pin, uint8_t value)
-{
-    if (pin <= MAX_PIN_GROUP_1)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (value != 0U)
-            PORTD |= bit_mask;
-        else
-            PORTD &= ~bit_mask;
-    }
-    else if (pin <= MAX_PIN_GROUP_2)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (value != 0U)
-            PORTB |= bit_mask;
-        else
-            PORTB &= ~bit_mask;
-    }
-    else if (pin <= MAX_PIN_GROUP_3)
-    {
-        const uint8_t bit_mask = (1U << (pin & PIN_MASK));
-        if (value != 0U)
-            PORTC |= bit_mask;
-        else
-            PORTC &= ~bit_mask;
-    }
-}
-
-/**
- * @brief Analog write for PWM control
- */
-void analogWrite_direct(uint8_t pin, uint8_t value)
-{
-    // Configure Timer0 only once
-    static bool pwm_timer0_configured = false;
-    if (!pwm_timer0_configured)
-    {
-        // Configure Timer0 for fast PWM mode.
-        TCCR0A = (1U << WGM00) | (1U << WGM01) | (1U << COM0A1) | (1U << COM0B1);
-        TCCR0B = (1U << CS01);  // prescaler 8
-        pwm_timer0_configured = true;
-    }
-
-    switch (pin)
-    {
-        case 5U:
-            OCR0B = value;
-            DDRD |= (1U << PD5);
-            break;
-        case 6U:
-            OCR0A = value;
-            DDRD |= (1U << PD6);
-            break;
-        default:
-            break;
-    }
-}
-
 // ===========================================================================
 // ADC SETUP FOR ENCODER READINGS
 // ===========================================================================
 
 /**
- * @brief Configures ADC for free-running mode on both encoder channels, it will alternate between them
- * and trigger an interrupt on each conversion completion. Therefore, it is non-blocking and the processor
- * can perform other tasks while the ADC is converting.
+ * @brief Configures ADC for free-running mode on both encoder channels
  */
 void setup_adc_free_running()
 {
     // Configure ADC prescaler for 125 kHz ADC clock (16MHz / 128 = 125kHz)
-    // This gives us a conversion time of 13 cycles = 104 µs per conversion
+    // ADPS[2:0] = 111 sets prescaler to 128, the slowest speed for max accuracy.
     ADCSRA =
       (1U << ADEN) | (1U << ADATE) | (1U << ADIE) | (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);  // Prescaler 128
 
@@ -684,7 +533,6 @@ void setup_adc_free_running()
 ISR(ADC_vect)
 {
     const uint8_t result = ADCH;
-    ++adc_conversion_count;
 
     if (current_channel == LEFT_ENC_PIN)
     {
@@ -754,63 +602,26 @@ void process_encoder_data(volatile uint8_t & raw_value, uint8_t & min_val, uint8
 }
 
 /**
- * @brief Calculates and resets filter update frequencies
+ * @brief Calculates the main loop frequency
  */
-void calculate_frequency(int & adc_frequency, int & ekf_frequency)
+void calculate_frequency()
 {
-    static uint32_t last_adc_count = 0U;
-    static uint32_t last_filter_count = 0U;
+    static uint32_t loop_counter = 0U;
     static uint32_t last_time = 0U;
+
+    loop_counter++;
 
     const uint32_t current_time = millis();
     const uint32_t elapsed_time = current_time - last_time;
 
     if (elapsed_time >= FREQ_CALC_INTERVAL_MS)
     {
-        uint32_t adc_count;
-        ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-        {
-            // necessary to prevent content modification during read
-            // https://docs.arduino.cc/language-reference/en/variables/variable-scope-qualifiers/volatile/
-            adc_count = adc_conversion_count;
-        }
+        // Calculate frequency (loops per second)
+        frequency = (loop_counter * 1000U + elapsed_time / 2U) / elapsed_time;
 
-        const uint32_t filter_count = ekf_filter_update_count;
-        const uint32_t adc_diff = adc_count - last_adc_count;
-        const uint32_t filter_diff = filter_count - last_filter_count;
-
-        adc_frequency = (adc_diff * 1000U + elapsed_time / 2U) / elapsed_time;
-        ekf_frequency = (filter_diff * 1000U + elapsed_time / 2U) / elapsed_time;
-
-        // Reset counters for next calculation
-        last_adc_count = adc_count;
-        last_filter_count = filter_count;
+        // Reset for next interval
         last_time = current_time;
-    }
-}
-
-/**
- * @brief Calculates actual PID update frequency
- */
-void calculate_pid_frequency()
-{
-    const uint32_t current_time = millis();
-    const uint32_t elapsed_time = current_time - last_pid_freq_time;
-
-    if (elapsed_time >= FREQ_CALC_INTERVAL_MS)
-    {
-        uint32_t current_pid_count;
-        ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-        {
-            current_pid_count = pid_update_counter;
-        }
-
-        const uint32_t pid_diff = current_pid_count - last_pid_count;
-        pid_actual_frequency = (pid_diff * 1000U + elapsed_time / 2U) / elapsed_time;
-
-        // Reset counters for next calculation
-        last_pid_count = current_pid_count;
-        last_pid_freq_time = current_time;
+        loop_counter = 0U;
     }
 }
 
@@ -822,17 +633,19 @@ void update_encoder_and_ekf()
     // Process left encoder data
     if (new_left_data)
     {
+        // Must clear flag *before* processing to avoid race condition
+        new_left_data = false;
         process_encoder_data(left_raw_value, left_min, left_max, left_sample_count, left_threshold, left_prev_state,
                              left_enc_count, left_direction, left_kalman, left_pwm);
-        new_left_data = false;
     }
 
     // Process right encoder data
     if (new_right_data)
     {
+        // Must clear flag *before* processing to avoid race condition
+        new_right_data = false;
         process_encoder_data(right_raw_value, right_min, right_max, right_sample_count, right_threshold,
                              right_prev_state, right_enc_count, right_direction, right_kalman, right_pwm);
-        new_right_data = false;
     }
 
     update_dynamic_thresholds();
@@ -874,12 +687,6 @@ void readSerialData()
 
 /**
  * @brief Processes serial commands for motor control and PID setpoints.
- *
- * Supported commands:
- *  - Legacy: L<pwm>R<pwm>D<left_dir><right_dir>  (unchanged)
- *  - New: T<left_rpm>,<right_rpm>   (example: T120,90)  -> enables PID for wheels
- *
- * When you send an L or R legacy PWM command for a wheel the PID for that wheel is disabled.
  */
 void processSerialCommand()
 {
@@ -902,7 +709,13 @@ void processSerialCommand()
         long lrpm = strtol(pointer, &endptr, 10);
         if (endptr != pointer)
         {
-            left_target_rpm = static_cast<float>(lrpm);
+            float target = static_cast<float>(lrpm);
+            // Constrain target RPM
+            if (fabsf(target) < MIN_TARGET_RPM)
+                left_target_rpm = 0.0F;  // If below min, set to 0
+            else
+                left_target_rpm = constrain(target, -MAX_TARGET_RPM, MAX_TARGET_RPM);
+
             pointer = endptr;
             // skip commas/spaces
             while (*pointer == ',' || *pointer == ' ' || *pointer == '\t')
@@ -911,7 +724,12 @@ void processSerialCommand()
             long rrpm = strtol(pointer, &endptr, 10);
             if (endptr != pointer)
             {
-                right_target_rpm = static_cast<float>(rrpm);
+                float target = static_cast<float>(rrpm);
+                // Constrain target RPM
+                if (fabsf(target) < MIN_TARGET_RPM)
+                    right_target_rpm = 0.0F;  // If below min, set to 0
+                else
+                    right_target_rpm = constrain(target, -MAX_TARGET_RPM, MAX_TARGET_RPM);
             }
             // enable PID for wheels where a valid target was provided
             left_pid_enabled = true;
@@ -920,9 +738,66 @@ void processSerialCommand()
             // reset PID controllers to avoid big jumps
             left_fast_pid.clear();
             right_fast_pid.clear();
+            Serial.print("T: ");
+            Serial.print(left_target_rpm);
+            Serial.print(", ");
+            Serial.println(right_target_rpm);
         }
         // done processing T-command
         return;
+    }
+
+    // New PID gains command: P<kp>,<ki>,<kd>
+    if (*pointer == 'P')
+    {
+        ++pointer;
+        // parse Kp
+        char * endptr = nullptr;
+        float new_kp = static_cast<float>(strtod(pointer, &endptr));
+        if (endptr != pointer)
+        {
+            kp = new_kp;  // Update global
+            pointer = endptr;
+
+            // skip commas/spaces
+            while (*pointer == ',' || *pointer == ' ' || *pointer == '\t')
+                ++pointer;
+
+            // parse Ki
+            float new_ki = static_cast<float>(strtod(pointer, &endptr));
+            if (endptr != pointer)
+            {
+                ki = new_ki;  // Update global
+                pointer = endptr;
+
+                // skip commas/spaces
+                while (*pointer == ',' || *pointer == ' ' || *pointer == '\t')
+                    ++pointer;
+
+                // parse Kd
+                float new_kd = static_cast<float>(strtod(pointer, &endptr));
+                if (endptr != pointer)
+                {
+                    kd = new_kd;  // Update global
+                }
+
+                // Re-configure PIDs with new gains
+                left_fast_pid.configure(kp, ki, kd, PID_UPDATE_RATE_HZ, 16, true);
+                right_fast_pid.configure(kp, ki, kd, PID_UPDATE_RATE_HZ, 16, true);
+
+                Serial.print("Kp, Ki, Kd: ");
+                Serial.print(kp);
+                Serial.print(", ");
+                Serial.print(ki);
+                Serial.print(", ");
+                Serial.println(kd);
+
+                // Clear PIDs
+                left_fast_pid.clear();
+                right_fast_pid.clear();
+            }
+        }
+        return;  // Done processing P command
     }
 
     // Parse left PWM (legacy) - disables left PID
@@ -956,12 +831,12 @@ void processSerialCommand()
         if (*pointer == '1')
         {
             left_direction = 1;
-            digitalWrite_direct(LEFT_DIR_PIN, LOW);
+            PORTB &= ~(1 << PB0);  // Pin 8 LOW
         }
         else if (*pointer == '0')
         {
             left_direction = -1;
-            digitalWrite_direct(LEFT_DIR_PIN, HIGH);
+            PORTB |= (1 << PB0);  // Pin 8 HIGH
         }
 
         ++pointer;
@@ -970,24 +845,20 @@ void processSerialCommand()
         if (*pointer == '1')
         {
             right_direction = 1;
-            digitalWrite_direct(RIGHT_DIR_PIN, HIGH);
+            PORTD |= (1 << PD7);  // Pin 7 HIGH
         }
         else if (*pointer == '0')
         {
             right_direction = -1;
-            digitalWrite_direct(RIGHT_DIR_PIN, LOW);
+            PORTD &= ~(1 << PD7);  // Pin 7 LOW
         }
     }
 
-    // Constrain PWM values and apply to motors (legacy manual mode)
-    left_pwm = constrain(left_pwm, 0, UINT8_MAX);
-    right_pwm = constrain(right_pwm, 0, UINT8_MAX);
-
     // Apply manual PWM outputs only if PID is not enabled for that wheel
     if (!left_pid_enabled)
-        analogWrite_direct(LEFT_PWM_PIN, left_pwm);
+        OCR0A = left_pwm;  // Pin 6
     if (!right_pid_enabled)
-        analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
+        OCR0B = right_pwm;  // Pin 5
 }
 
 // ============================================================================
@@ -1003,12 +874,6 @@ void serial_print_telemetry()
 
     const StateVector & left_state = left_kalman.get_state_vector();
     const StateVector & right_state = right_kalman.get_state_vector();
-
-    // Calculate frequencies
-    static int adc_frequency = 0;
-    static int ekf_frequency = 0;
-    calculate_frequency(adc_frequency, ekf_frequency);
-    calculate_pid_frequency();
 
     // left wheel data
     const float left_encoder_rad = static_cast<float>(left_enc_count) * RADIANS_PER_COUNT;
@@ -1081,55 +946,135 @@ void serial_print_telemetry()
     Serial.println(right_enc_state);
 
     // Frequency data
-    Serial.print(">Fadc:");
-    Serial.println(adc_frequency);
-    Serial.print(">Fekf:");
-    Serial.println(ekf_frequency);
-    Serial.print(">Fpid:");
-    Serial.println(pid_actual_frequency);
+    Serial.print(">Freq:");
+    Serial.println(frequency);
 }
+
+// ============================================================================
+// PID CONTROL (REFACTORED)
+// ============================================================================
 
 /**
- * @brief Prints minimum telemetry data
+ * @brief Holds state and logic for a single wheel's PID controller
  */
-void serial_print_minimum_telemetry()
+struct PidUpdater
 {
-    const StateVector & left_state = left_kalman.get_state_vector();
-    const StateVector & right_state = right_kalman.get_state_vector();
+    WheelKalmanState & kalman;
+    FastPID & pid;
+    uint32_t boost_until_us = 0;     // Internal state for startup boost
+    float last_measured_rpm = 0.0f;  // State to detect "stuck" vs "passing through"
 
-    // Calculate filter frequencies
-    static int adc_frequency = 0;
-    static int ekf_frequency = 0;
-    calculate_frequency(adc_frequency, ekf_frequency);
-    calculate_pid_frequency();  // Calculate PID frequency
+    PidUpdater(WheelKalmanState & k, FastPID & p) : kalman(k), pid(p) {}
 
-    // left wheel data
-    const float left_rpm = left_state[1] * RAD_S_TO_RPM;
+    /**
+     * @brief Computes the required PWM and direction for a wheel
+     */
+    void compute_output(uint32_t now_us, float dt_pwm, float target_rpm, uint8_t & out_pwm, int8_t & out_direction)
+    {
+        const StateVector & state = kalman.get_state_vector();
+        const float measured_rpm = state[1] * RAD_S_TO_RPM;
 
-    // right wheel data
-    const float right_rpm = right_state[1] * RAD_S_TO_RPM;
+        // --- Zero RPM Target Override ---
+        // If the target is 0 and we are already stopped (or very close),
+        // force PWM to 0 to prevent "buzzing" or "hunting" around zero.
+        if (target_rpm == 0.0F && fabsf(measured_rpm) < ZERO_RPM_THRESHOLD)
+        {
+            out_pwm = 0;
+            out_direction = 1;  // Direction doesn't matter when PWM is 0
+            pid.clear();        // Clear the PID to prevent integral windup from this state
+            return;
+        }
 
-    // Speed data
-    Serial.print(">Lrpm:");
-    Serial.println(left_rpm, 4);
-    Serial.print(">Rrpm:");
-    Serial.println(right_rpm, 4);
+        // Convert RPM to PID input (scaled for better resolution)
+        const int16_t target_pid = static_cast<int16_t>(target_rpm * 10.0f);
+        const int16_t measured_pid = static_cast<int16_t>(measured_rpm * 10.0f);
 
-    // Frequency data
-    Serial.print(">Fekf:");
-    Serial.println(ekf_frequency);
-    Serial.print(">Fpid:");
-    Serial.println(pid_actual_frequency);
-}
+        // --- Feed-Forward and Anti-Windup Logic ---
 
-// ============================================================================
-// ARDUINO MAIN FUNCTIONS
-// ============================================================================
+        // 1. Calculate Feed-Forward
+        const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD) * signf(target_rpm);
 
+        // Startup boost logic
+        const float stuck_rpm_thresh = 1.0f;
+        bool is_stuck = fabsf(measured_rpm) < stuck_rpm_thresh;
+        bool was_stuck = fabsf(last_measured_rpm) < stuck_rpm_thresh;
+
+        if (is_stuck && was_stuck && fabsf(target_rpm) > 0.5f)
+        {
+            // We are genuinely stuck at zero, request a boost
+            boost_until_us = now_us + BOOST_DURATION_US;
+        }
+        else if (!is_stuck)
+        {
+            // We are moving, so clear any pending boost
+            boost_until_us = 0;
+        }
+
+        last_measured_rpm = measured_rpm;  // Remember for next cycle
+
+        float ff_total = ff_pwm;
+        if (now_us < boost_until_us)
+        {
+            // Apply boost
+            ff_total = signf(target_rpm) * (STATIC_FRICTION_THRESHOLD * BOOST_MULTIPLIER);
+        }
+
+        // 2. Set Dynamic Output Range for Anti-Windup
+        // The PID output must fit in the remaining room *after* feed-forward is applied.
+        // We scale by 10 for the PID's integer math.
+        const int16_t ff_scaled = static_cast<int16_t>(ff_total * 10.0f);
+        const int16_t max_output_scaled = 2550;
+        const int16_t min_output_scaled = -2550;
+
+        // The PID output range is now asymmetric
+        pid.setOutputRange(min_output_scaled - ff_scaled, max_output_scaled - ff_scaled);
+
+        // 3. Get PID output (which is now correctly clamped by FastPID's internal anti-windup)
+        int16_t pid_output = pid.step(target_pid, measured_pid);
+
+        // 4. Combine PID output and Feed-Forward
+        // We use the scaled values for combination *before* clamping
+        int32_t u_scaled = static_cast<int32_t>(pid_output) + static_cast<int32_t>(ff_scaled);
+
+        // 5. Clamp the *final* combined output
+        if (u_scaled > max_output_scaled)
+            u_scaled = max_output_scaled;
+        else if (u_scaled < min_output_scaled)
+            u_scaled = min_output_scaled;
+
+        // Convert scaled output back to float
+        float u = static_cast<float>(u_scaled) / 10.0f;
+
+        // 6. Slew-rate limit the *signed* output
+        float max_delta = PWM_SLEW_RATE_PER_MS * dt_pwm;
+        // out_pwm is the current magnitude, out_direction is the current direction
+        float current_signed_pwm = static_cast<float>(out_pwm) * static_cast<float>(out_direction);
+        // u is the desired signed pwm
+        float pwm_diff = u - current_signed_pwm;
+
+        if (pwm_diff > max_delta)
+            u = current_signed_pwm + max_delta;
+        else if (pwm_diff < -max_delta)
+            u = current_signed_pwm - max_delta;
+
+        // 7. Set final output variables from the slew-limited signed value
+        out_pwm = static_cast<uint8_t>(constrain(static_cast<int>(fabsf(u)), 0, 255));
+        out_direction = (u >= 0.0f) ? 1 : -1;
+    }
+};
+
+// Create global instances of the PID updater struct
+PidUpdater left_pid_updater(left_kalman, left_fast_pid);
+PidUpdater right_pid_updater(right_kalman, right_fast_pid);
+
+/**
+ * @brief Applies PID control outputs to both motors
+ * @note This is now much simpler and delegates logic to PidUpdater
+ */
 void apply_pid_control_once()
 {
     const uint32_t now_us = micros();
-    float dt_pwm = 0.001f;
+    float dt_pwm = MAX_DT;  // Default to 1ms
     if (last_pwm_update_us != 0U)
         dt_pwm = (now_us - last_pwm_update_us) / 1e3f;  // ms
     last_pwm_update_us = now_us;
@@ -1137,133 +1082,49 @@ void apply_pid_control_once()
     // LEFT
     if (left_pid_enabled)
     {
-        const StateVector & lstate = left_kalman.get_state_vector();
-        const float measured_rpm = lstate[1] * RAD_S_TO_RPM;
+        left_pid_updater.compute_output(now_us, dt_pwm, left_target_rpm, left_pwm, left_direction);
 
-        // Convert RPM to PID input (scaled for better resolution)
-        const int16_t target_pid = static_cast<int16_t>(left_target_rpm * 10.0f);  // Scale by 10 for more resolution
-        const int16_t measured_pid = static_cast<int16_t>(measured_rpm * 10.0f);
-
-        // feedforward (static friction compensation) -- signed
-        const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(left_target_rpm);
-
-        // Startup boost: if measured RPM is near zero and we have a non-zero target, give a short timed boost
-        static uint32_t left_boost_until_us = 0U;
-        const float stuck_rpm_thresh = 1.0f;  // rpm threshold to consider "not moving"
-        if (fabsf(measured_rpm) < stuck_rpm_thresh && fabsf(left_target_rpm) > 0.5f)
-        {
-            // request a boost for a short window
-            left_boost_until_us = now_us + 150000UL;  // 150 ms
-        }
-
-        float ff_total = ff_pwm;
-        if (now_us < left_boost_until_us)
-        {
-            // additional boost
-            ff_total = signf(left_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
-        }
-
-        // Get PID output
-        int16_t pid_output = left_fast_pid.step(target_pid, measured_pid);
-
-        // Convert PID output back to PWM scale and add feedforward
-        float u = static_cast<float>(pid_output) / 10.0f + ff_total;  // Scale down since we scaled up input
-
-        // compute pwm candidate
-        float pwr = fabsf(u);
-        if (pwr > 255.0f)
-            pwr = 255.0f;
-
-        int dir = (u >= 0.0f) ? 1 : -1;
-
-        // slew-rate limit pwm change
-        float max_delta = PWM_SLEW_RATE_PER_MS * dt_pwm;
-        float desired_pwm = pwr;
-        float pwm_diff = desired_pwm - static_cast<float>(left_pwm);
-        if (pwm_diff > max_delta)
-            desired_pwm = left_pwm + max_delta;
-        else if (pwm_diff < -max_delta)
-            desired_pwm = left_pwm - max_delta;
-
-        // write direction and pwm
-        left_direction = static_cast<int8_t>(dir);
-        if (dir == 1)
-            digitalWrite_direct(LEFT_DIR_PIN, LOW);
+        // write direction (LOW = forward, HIGH = backward)
+        if (left_direction == 1)
+            PORTB &= ~(1 << PB0);  // Pin 8 LOW
         else
-            digitalWrite_direct(LEFT_DIR_PIN, HIGH);
+            PORTB |= (1 << PB0);  // Pin 8 HIGH
 
-        left_pwm = static_cast<uint8_t>(constrain(static_cast<int>(desired_pwm), 0, 255));
-        analogWrite_direct(LEFT_PWM_PIN, left_pwm);
+        // write pwm
+        OCR0A = left_pwm;  // Pin 6
     }
 
     // Right wheel
     if (right_pid_enabled)
     {
-        const StateVector & rstate = right_kalman.get_state_vector();
-        const float measured_rpm = rstate[1] * RAD_S_TO_RPM;
+        right_pid_updater.compute_output(now_us, dt_pwm, right_target_rpm, right_pwm, right_direction);
 
-        // Convert RPM to PID input (scaled for better resolution)
-        const int16_t target_pid = static_cast<int16_t>(right_target_rpm * 10.0f);  // Scale by 10 for more resolution
-        const int16_t measured_pid = static_cast<int16_t>(measured_rpm * 10.0f);
-
-        // feedforward (static friction compensation) -- signed
-        const float ff_pwm = static_cast<float>(STATIC_FRICTION_THRESHOLD + 20) * signf(right_target_rpm);
-
-        // Startup boost: if measured RPM is near zero and we have a non-zero target, give a short timed boost
-        static uint32_t right_boost_until_us = 0U;
-        const float stuck_rpm_thresh = 1.0f;  // rpm threshold to consider "not moving"
-        if (fabsf(measured_rpm) < stuck_rpm_thresh && fabsf(right_target_rpm) > 0.5f)
-        {
-            // request a boost for a short window
-            right_boost_until_us = now_us + 150000UL;  // 150 ms
-        }
-
-        float ff_total = ff_pwm;
-        if (now_us < right_boost_until_us)
-        {
-            // additional boost
-            ff_total = signf(right_target_rpm) * (STATIC_FRICTION_THRESHOLD + 80);
-        }
-
-        // Get PID output
-        int16_t pid_output = right_fast_pid.step(target_pid, measured_pid);
-
-        // Convert PID output back to PWM scale and add feedforward
-        float u = static_cast<float>(pid_output) / 10.0f + ff_total;  // Scale down since we scaled up input
-
-        // compute pwm candidate
-        float pwr = fabsf(u);
-        if (pwr > 255.0f)
-            pwr = 255.0f;
-
-        int dir = (u >= 0.0f) ? 1 : -1;
-
-        // slew-rate limit pwm change
-        float max_delta = PWM_SLEW_RATE_PER_MS * dt_pwm;
-        float desired_pwm = pwr;
-        float pwm_diff = desired_pwm - static_cast<float>(right_pwm);
-        if (pwm_diff > max_delta)
-            desired_pwm = right_pwm + max_delta;
-        else if (pwm_diff < -max_delta)
-            desired_pwm = right_pwm - max_delta;
-
-        // write direction and pwm
-        right_direction = static_cast<int8_t>(dir);
-        if (dir == 1)
-            digitalWrite_direct(RIGHT_DIR_PIN, HIGH);
+        // write direction (HIGH = forward, LOW = backward)
+        if (right_direction == 1)
+            PORTD |= (1 << PD7);  // Pin 7 HIGH
         else
-            digitalWrite_direct(RIGHT_DIR_PIN, LOW);
+            PORTD &= ~(1 << PD7);  // Pin 7 LOW
 
-        right_pwm = static_cast<uint8_t>(constrain(static_cast<int>(desired_pwm), 0, 255));
-        analogWrite_direct(RIGHT_PWM_PIN, right_pwm);
+        // write pwm
+        OCR0B = right_pwm;  // Pin 5
     }
 }
 
+// ============================================================================
+// ARDUINO MAIN FUNCTIONS
+// ============================================================================
+
 void setup()
 {
-    // Initialize motor control pins
-    for (int pin = 5; pin <= 8; ++pin)
-        pinMode_direct(pin, OUTPUT);
+    // Initialize motor control pins as outputs
+    // (Pin 5, 6, 7 are on PORTD; Pin 8 is on PORTB)
+    DDRD |= (1 << PD5) | (1 << PD6) | (1 << PD7);
+    DDRB |= (1 << PB0);
+
+    // Configure Timer0 for fast PWM mode on pins 5 (OC0B) and 6 (OC0A)
+    // Prescaler = 8 (approx 7.8 kHz PWM frequency)
+    TCCR0A = (1U << WGM00) | (1U << WGM01) | (1U << COM0A1) | (1U << COM0B1);
+    TCCR0B = (1U << CS01);
 
     // Initialize serial communication
     Serial.begin(BAUD_RATE);
@@ -1273,11 +1134,12 @@ void setup()
     Serial.println("Send commands: L<pwm>R<pwm>D<left_dir><right_dir>");
     Serial.println("Example: L128R255D11");
     Serial.println("Set RPM targets: T<left_rpm>,<right_rpm>  (example: T120,90)");
+    Serial.println("Set PID gains: P<kp>,<ki>,<kd>  (example: P3.0,1.0,0.2)");
 
     // Configure FastPID controllers
     // Parameters: kp, ki, kd, hz, bits, sign
-    left_fast_pid.configure(3.0, 1.0, 0.0, PID_UPDATE_RATE_HZ, 16, true);
-    right_fast_pid.configure(3.0, 1.0, 0.0, PID_UPDATE_RATE_HZ, 16, true);
+    left_fast_pid.configure(kp, ki, kd, PID_UPDATE_RATE_HZ, 16, true);
+    right_fast_pid.configure(kp, ki, kd, PID_UPDATE_RATE_HZ, 16, true);
 
     // Set output range for PID (scaled by 10 for better resolution)
     left_fast_pid.setOutputRange(-2550, 2550);  // -255 to 255 scaled by 10
@@ -1286,16 +1148,8 @@ void setup()
     // Start ADC free-running mode
     setup_adc_free_running();
 
-    // Setup PID timer interrupt
-    setup_pid_timer();
-
     // Allow time for ADC stabilization
     delay(INITIAL_DELAY_MS);
-
-    // right_pid_enabled = true;
-    // left_target_rpm = 20.0f;
-    // right_target_rpm = 20.0f;
-    // left_pid_enabled = true;
 }
 
 void loop()
@@ -1307,20 +1161,18 @@ void loop()
     readSerialData();
     processSerialCommand();
 
-    // Apply PID outputs if enabled and timer flag is set
-    if (pid_update_flag)
+    // Apply PID outputs if enabled based on non-blocking delay
+    if (nonBlockingDelay(last_pid_update_time, PID_UPDATE_INTERVAL_MS))
     {
         apply_pid_control_once();
-        pid_update_flag = false;
     }
+
+    // Calculate loop frequency
+    calculate_frequency();
 
 #if TELEMETRY
     static uint32_t last_telemetry_time = 0U;
     if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
         serial_print_telemetry();
-#else
-    static uint32_t last_telemetry_time = 0U;
-    if (nonBlockingDelay(last_telemetry_time, TELEMETRY_INTERVAL_MS))
-        serial_print_minimum_telemetry();
 #endif
 }

@@ -16,8 +16,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "LFrd",
-                  "_id": "data-serie-160",
+                  "_serie": "LeftAngleRad",
+                  "_id": "data-serie-74",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -30,8 +30,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "LErd",
-                  "_id": "data-serie-161",
+                  "_serie": "LeftEncoderRad",
+                  "_id": "data-serie-75",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -55,8 +55,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Ldir",
-                  "_id": "data-serie-162",
+                  "_serie": "LeftDir",
+                  "_id": "data-serie-76",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -69,8 +69,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lstk",
-                  "_id": "data-serie-163",
+                  "_serie": "LeftStuck",
+                  "_id": "data-serie-77",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -83,8 +83,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lpwm",
-                  "_id": "data-serie-164",
+                  "_serie": "LeftPWM",
+                  "_id": "data-serie-78",
                   "stroke": "rgba(46,204,113,1)",
                   "fill": "rgba(46,204,113,0.1)"
                },
@@ -108,8 +108,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "RFrd",
-                  "_id": "data-serie-165",
+                  "_serie": "RightAngleRad",
+                  "_id": "data-serie-79",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -122,8 +122,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "RErd",
-                  "_id": "data-serie-166",
+                  "_serie": "RightEncoderRad",
+                  "_id": "data-serie-80",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -147,8 +147,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rdir",
-                  "_id": "data-serie-167",
+                  "_serie": "RightDir",
+                  "_id": "data-serie-81",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -161,8 +161,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rstk",
-                  "_id": "data-serie-168",
+                  "_serie": "RightStuck",
+                  "_id": "data-serie-82",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -175,8 +175,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rpwm",
-                  "_id": "data-serie-169",
+                  "_serie": "RightPWM",
+                  "_id": "data-serie-83",
                   "stroke": "rgba(46,204,113,1)",
                   "fill": "rgba(46,204,113,0.1)"
                },
@@ -187,7 +187,7 @@
       {
          "type": "chart",
          "gridPos": {
-            "h": 7,
+            "h": 5,
             "w": 8,
             "x": 0,
             "y": 0
@@ -200,8 +200,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lrpm",
-                  "_id": "data-serie-170",
+                  "_serie": "LeftRPM",
+                  "_id": "data-serie-84",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -212,7 +212,7 @@
       {
          "type": "chart",
          "gridPos": {
-            "h": 7,
+            "h": 5,
             "w": 4,
             "x": 0,
             "y": 0
@@ -225,8 +225,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lraw",
-                  "_id": "data-serie-173",
+                  "_serie": "LeftEncRaw",
+                  "_id": "data-serie-85",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -239,8 +239,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lmin",
-                  "_id": "data-serie-174",
+                  "_serie": "LeftEncMin",
+                  "_id": "data-serie-86",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -253,8 +253,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lmax",
-                  "_id": "data-serie-175",
+                  "_serie": "LeftEncMax",
+                  "_id": "data-serie-87",
                   "stroke": "rgba(46,204,113,1)",
                   "fill": "rgba(46,204,113,0.1)"
                },
@@ -267,8 +267,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Ltsh",
-                  "_id": "data-serie-176",
+                  "_serie": "LeftEncThresh",
+                  "_id": "data-serie-88",
                   "stroke": "rgba(155,89,182,1)",
                   "fill": "rgba(155,89,182,0.1)"
                },
@@ -281,8 +281,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Lenc",
-                  "_id": "data-serie-177",
+                  "_serie": "LeftEncState",
+                  "_id": "data-serie-89",
                   "stroke": "rgba(241,196,15,1)",
                   "fill": "rgba(241,196,15,0.1)"
                },
@@ -293,7 +293,7 @@
       {
          "type": "chart",
          "gridPos": {
-            "h": 7,
+            "h": 5,
             "w": 8,
             "x": 0,
             "y": 0
@@ -306,8 +306,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rrpm",
-                  "_id": "data-serie-178",
+                  "_serie": "RightRPM",
+                  "_id": "data-serie-90",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -318,7 +318,7 @@
       {
          "type": "chart",
          "gridPos": {
-            "h": 7,
+            "h": 5,
             "w": 4,
             "x": 0,
             "y": 0
@@ -331,8 +331,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rraw",
-                  "_id": "data-serie-181",
+                  "_serie": "RightEncRaw",
+                  "_id": "data-serie-91",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -345,8 +345,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rmin",
-                  "_id": "data-serie-182",
+                  "_serie": "RightEncMin",
+                  "_id": "data-serie-92",
                   "stroke": "rgba(52,152,219,1)",
                   "fill": "rgba(52,152,219,0.1)"
                },
@@ -359,8 +359,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rmax",
-                  "_id": "data-serie-183",
+                  "_serie": "RightEncMax",
+                  "_id": "data-serie-93",
                   "stroke": "rgba(46,204,113,1)",
                   "fill": "rgba(46,204,113,0.1)"
                },
@@ -373,8 +373,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Rtsh",
-                  "_id": "data-serie-184",
+                  "_serie": "RightEncThresh",
+                  "_id": "data-serie-94",
                   "stroke": "rgba(155,89,182,1)",
                   "fill": "rgba(155,89,182,0.1)"
                },
@@ -387,8 +387,8 @@
                ],
                "formula": "",
                "options": {
-                  "_serie": "Renc",
-                  "_id": "data-serie-185",
+                  "_serie": "RightEncState",
+                  "_id": "data-serie-95",
                   "stroke": "rgba(241,196,15,1)",
                   "fill": "rgba(241,196,15,0.1)"
                },
@@ -397,48 +397,23 @@
          ]
       },
       {
-         "type": "chart",
+         "type": "number",
          "gridPos": {
-            "h": 6,
-            "w": 6,
+            "h": 2,
+            "w": 12,
             "x": 0,
             "y": 0
          },
          "series": [
             {
-               "name": "ADCFreq",
+               "name": "Frequency",
                "sourceNames": [
-                  "Fadc"
+                  "Freq"
                ],
                "formula": "",
                "options": {
-                  "_serie": "Fadc",
-                  "_id": "data-serie-194",
-                  "stroke": "rgba(231,76,60,1)",
-                  "fill": "rgba(231,76,60,0.1)"
-               },
-               "type": "number"
-            }
-         ]
-      },
-      {
-         "type": "chart",
-         "gridPos": {
-            "h": 6,
-            "w": 6,
-            "x": 0,
-            "y": 0
-         },
-         "series": [
-            {
-               "name": "EKFFreq",
-               "sourceNames": [
-                  "Fekf"
-               ],
-               "formula": "",
-               "options": {
-                  "_serie": "Fekf",
-                  "_id": "data-serie-195",
+                  "_serie": "Freq",
+                  "_id": "data-serie-99",
                   "stroke": "rgba(231,76,60,1)",
                   "fill": "rgba(231,76,60,0.1)"
                },
@@ -447,5 +422,5 @@
          ]
       }
    ],
-   "viewDuration": "5"
+   "viewDuration": "10"
 }
