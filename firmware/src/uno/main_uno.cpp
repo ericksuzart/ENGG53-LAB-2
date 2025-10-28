@@ -1,5 +1,5 @@
 #include <ArduinoSTL.h>
-#include <avr/io.h>  // Include for direct port manipulation
+#include <avr/io.h>
 #include <util/atomic.h>
 
 #include <array>
@@ -8,7 +8,7 @@
 #undef min
 #undef max
 
-#include <FastPID.h>  // Include FastPID library
+#include <FastPID.h>
 
 #include <vt_kalman>
 #include <vt_linalg>
@@ -39,15 +39,15 @@ constexpr int CONTROL_DIM = 3;  // [dt, pwm, direction]
 
 // Serial communication
 constexpr int SERIAL_BUFFER_SIZE = 32;
-constexpr int SERIAL_TIMEOUT_MS = 100;
+constexpr int SERIAL_TIMEOUT_MS = 10;
 
 // Motor interface pins
 constexpr int LEFT_ENC_PIN = 0;
 constexpr int RIGHT_ENC_PIN = 1;
 
 // ADC constants
-constexpr uint8_t ADC_MAX_VALUE = 255U;
-constexpr uint8_t ADC_INITIAL_THRESHOLD = 128U;
+constexpr uint16_t ADC_MAX_VALUE = UINT16_MAX;
+constexpr uint16_t ADC_INITIAL_THRESHOLD = ADC_MAX_VALUE / 2;
 constexpr uint8_t PIN_MASK = 0x07U;
 
 // Motor model constants
@@ -55,7 +55,7 @@ constexpr float PWM_TO_ACCELERATION_GAIN = 0.01F;
 constexpr float MAX_ACCELERATION = 200.0F;
 constexpr float MIN_ACCELERATION = -200.0F;
 
-constexpr float BRAKING_COEFFICIENT = 5.0F;        // tune needed
+constexpr float BRAKING_COEFFICIENT = 5.0F;
 constexpr float FRICTION_COEFFICIENT = 0.003F;
 constexpr float STATIC_FRICTION_THRESHOLD = 175.0F;
 constexpr float STUCK_VELOCITY_THRESHOLD = 0.05F;
@@ -65,9 +65,9 @@ constexpr float ZERO_RPM_THRESHOLD = VELOCITY_THRESHOLD * RAD_S_TO_RPM;
 
 // Timing constants
 #if TELEMETRY
-constexpr float MAX_DT = 0.013F;
+constexpr float MAX_DT = 0.014F;
 #else
-constexpr float MAX_DT = 0.0065F;
+constexpr float MAX_DT = 0.0100F;
 #endif
 constexpr float MIN_DT = 0.001F;
 constexpr uint32_t INITIAL_DELAY_MS = 100U;
@@ -76,24 +76,29 @@ constexpr uint32_t TELEMETRY_INTERVAL_MS = 200U;  // 5Hz
 constexpr uint32_t STUCK_THRESHOLD_MS = 5000U;    // 5 seconds
 constexpr uint32_t MICROSECONDS_PER_SECOND = 1000000UL;
 constexpr uint32_t MILLISECONDS_PER_SECOND = 1000UL;
-
+constexpr uint32_t LOOP_DELAY_US = 100UL;  // 0.1 ms
 // PID control constants
+#if TELEMETRY
+constexpr uint32_t PID_UPDATE_RATE_HZ = 10U;  // 10 Hz PID update
+constexpr uint32_t PID_UPDATE_INTERVAL_MS = 1000U / PID_UPDATE_RATE_HZ;
+#else
 constexpr uint32_t PID_UPDATE_RATE_HZ = 20U;  // 20 Hz PID update
 constexpr uint32_t PID_UPDATE_INTERVAL_MS = 1000U / PID_UPDATE_RATE_HZ;
-constexpr float MIN_TARGET_RPM = 10.0F;
+#endif
+
+constexpr float MIN_TARGET_RPM = 5.0F;
 constexpr float MAX_TARGET_RPM = 50.0F;
 
 // PWM slew limiter
-constexpr float PWM_SLEW_RATE_PER_MS = 10.0f;    // max pwm change per millisecond (tune)
-constexpr float BOOST_MULTIPLIER = 1.1F;         // 1.1x the static friction threshold
-constexpr uint32_t BOOST_DURATION_US = 15000UL;  // 15 ms
-uint32_t last_pwm_update_us = 0U;
+constexpr float PWM_SLEW_RATE_PER_MS = 10.0f;  // max pwm change per millisecond
+constexpr float BOOST_MULTIPLIER = 1.1F;       // 1.1x the static friction threshold
+constexpr uint32_t BOOST_DURATION_US = 150UL;  // 0.15 ms
 
 // Additional constants
 constexpr float HALF = 0.5F;
 
 // ============================================================================
-// ALIASES
+// ALIASES FOR EKF
 // ============================================================================
 
 using EKF = vt::extended_kalman_filter_t<STATE_DIM, MEAS_DIM, CONTROL_DIM>;
@@ -106,25 +111,25 @@ using ControlVector = vt::numeric_vector<CONTROL_DIM>;
 // ============================================================================
 
 // --- Encoder ---
-volatile uint8_t current_channel = 0U;  // ADC channel being read
-volatile uint8_t left_raw_value = 0U;   // Latest ADC value for left encoder
-volatile uint8_t right_raw_value = 0U;  // Latest ADC value for right encoder
-volatile bool new_left_data = false;    // Flag for new left encoder data
-volatile bool new_right_data = false;   // Flag for new right encoder data
+volatile uint8_t current_channel = 0U;   // ADC channel being read
+volatile uint16_t left_raw_value = 0U;   // Latest ADC value for left encoder
+volatile uint16_t right_raw_value = 0U;  // Latest ADC value for right encoder
+volatile bool new_left_data = false;     // Flag for new left encoder data
+volatile bool new_right_data = false;    // Flag for new right encoder data
 
 // Tracking
 int32_t left_enc_count = 0U;
 int32_t right_enc_count = 0U;
-uint8_t left_prev_state = 0;
-uint8_t right_prev_state = 0;
+uint8_t left_prev_state = 0U;
+uint8_t right_prev_state = 0U;
 
 // Dynamic threshold calibration
-uint8_t left_min = ADC_MAX_VALUE;
-uint8_t left_max = 0U;
-uint8_t right_min = ADC_MAX_VALUE;
-uint8_t right_max = 0U;
-uint8_t left_threshold = ADC_INITIAL_THRESHOLD;
-uint8_t right_threshold = ADC_INITIAL_THRESHOLD;
+uint16_t left_min = ADC_MAX_VALUE;
+uint16_t left_max = 0U;
+uint16_t right_min = ADC_MAX_VALUE;
+uint16_t right_max = 0U;
+uint16_t left_threshold = ADC_INITIAL_THRESHOLD;
+uint16_t right_threshold = ADC_INITIAL_THRESHOLD;
 uint8_t left_sample_count = 0U;
 uint8_t right_sample_count = 0U;
 
@@ -145,7 +150,7 @@ float right_target_rpm = 0.0F;
 bool left_pid_enabled = false;
 bool right_pid_enabled = false;
 
-// Global PID gains
+// PID gains
 float kp = 3.0F;
 float ki = 0.5F;
 float kd = 6.0F;
@@ -156,9 +161,7 @@ FastPID right_fast_pid;
 
 // PID timing
 uint32_t last_pid_update_time = 0U;
-
-// Loop frequency calculation
-int frequency = 0;
+uint32_t last_pwm_update_us = 0U;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -195,7 +198,9 @@ inline bool nonBlockingDelay(uint32_t & last_time, const uint32_t & ms_delay)
     return false;
 }
 
-// helper sign
+/**
+ * @brief Sign function for float values
+ */
 static inline int signf(float x)
 {
     return (x > 0.0f) - (x < 0.0f);
@@ -226,9 +231,12 @@ class WheelKalmanState
     uint32_t last_movement_time_ = 0U;
     bool was_moving_ = false;
 
-    // Noise matrices - made const to fix warnings
-    static const vt::numeric_matrix<STATE_DIM, STATE_DIM> process_noise_covariance_;
-    static const vt::numeric_matrix<MEAS_DIM, MEAS_DIM> measurement_noise_covariance_;
+    // How much we trust the model. Lower values = more trust.
+    const vt::numeric_matrix<STATE_DIM, STATE_DIM> process_noise_covariance_ =
+      vt::numeric_matrix<STATE_DIM, STATE_DIM>::diagonals({0.001F, 0.5F, 5.0F});
+    // How much we trust the sensor. Lower values = more trust.
+    const vt::numeric_matrix<MEAS_DIM, MEAS_DIM> measurement_noise_covariance_ =
+      vt::numeric_matrix<MEAS_DIM, MEAS_DIM>::diagonals(10.0F);
 
    public:
     WheelKalmanState()
@@ -337,15 +345,17 @@ class WheelKalmanState
         jacobian(0, 1) = dt;
         jacobian(0, 2) = HALF * dt * dt;
 
-        // --- LOGIC FOR DERIVATIVES (SHARED BETWEEN VELOCITY AND ACCELERATION) ---
+        // Determine operating state for acceleration derivative calculation
         const bool is_potentially_stuck =
           (fabsf(current_velocity) < STUCK_VELOCITY_THRESHOLD) && (fabsf(signed_pwm) > STATIC_FRICTION_THRESHOLD);
 
+        // Is the command fighting the current velocity (braking)?
         const bool direction_mismatch = (current_velocity * direction_command) < 0.0F;
         float dAcc_dVel = 0.0F;  // Derivative of acceleration w.r.t velocity
 
         if (fabsf(signed_pwm) > STATIC_FRICTION_THRESHOLD && !is_potentially_stuck)
         {
+            // --- State 1: Normal Operation (Commanded and Moving) ---
             if (direction_mismatch && fabsf(current_velocity) > VELOCITY_THRESHOLD)
                 dAcc_dVel = -BRAKING_COEFFICIENT;  // Strong braking: a = -v * BRAKING_COEFFICIENT
             else
@@ -353,6 +363,7 @@ class WheelKalmanState
         }
         else
         {
+            // --- State 2 & 3: Stuck or Coasting ---
             if (is_potentially_stuck)
                 dAcc_dVel = -STUCK_DAMPING_COEFFICIENT;  // Strong static friction: a = -v * STUCK_DAMPING_COEFFICIENT
             else
@@ -489,14 +500,6 @@ class WheelKalmanState
     }
 };
 
-// How much you trust the model. Lower values = more trust.
-const vt::numeric_matrix<STATE_DIM, STATE_DIM> WheelKalmanState::process_noise_covariance_ =
-  vt::numeric_matrix<STATE_DIM, STATE_DIM>::diagonals({0.001F, 0.5F, 5.0F});
-
-// How much you trust the sensor. Lower values = more trust.
-const vt::numeric_matrix<MEAS_DIM, MEAS_DIM> WheelKalmanState::measurement_noise_covariance_ =
-  vt::numeric_matrix<MEAS_DIM, MEAS_DIM>::diagonals(10.0F);
-
 // Global Kalman filter instances
 WheelKalmanState left_kalman;
 WheelKalmanState right_kalman;
@@ -518,8 +521,9 @@ void setup_adc_free_running()
     // Set trigger source to Free Running mode
     ADCSRB = 0U;
 
-    // Configure first channel with AVcc reference and left-adjusted result (8-bit mode)
-    ADMUX = (1U << REFS0) | (1U << ADLAR) | (current_channel & PIN_MASK);
+    // Configure first channel with AVcc reference and right-adjusted result (10-bit mode)
+    // ADLAR (Left Adjust) is NOT set, so we get the full 10-bit resolution
+    ADMUX = (1U << REFS0) | (current_channel & PIN_MASK);
 
     // Start first conversion
     ADCSRA |= (1U << ADSC);
@@ -532,7 +536,10 @@ void setup_adc_free_running()
  */
 ISR(ADC_vect)
 {
-    const uint8_t result = ADCH;
+    // Read ADCL first, then ADCH to get the 10-bit result
+    const uint8_t low = ADCL;
+    const uint8_t high = ADCH;
+    const uint16_t result = (high << 8) | low;
 
     if (current_channel == LEFT_ENC_PIN)
     {
@@ -548,7 +555,8 @@ ISR(ADC_vect)
     }
 
     // Switch to next channel
-    ADMUX = (1U << REFS0) | (1U << ADLAR) | (current_channel & PIN_MASK);
+    // ADLAR should NOT be set, as setup configures for 10-bit right-adjusted mode
+    ADMUX = (1U << REFS0) | (current_channel & PIN_MASK);
 }
 
 // ============================================================================
@@ -560,8 +568,9 @@ ISR(ADC_vect)
  */
 void update_dynamic_thresholds()
 {
-    left_threshold = static_cast<uint8_t>((static_cast<uint16_t>(left_min) + static_cast<uint16_t>(left_max)) / 2U);
-    right_threshold = static_cast<uint8_t>((static_cast<uint16_t>(right_min) + static_cast<uint16_t>(right_max)) / 2U);
+    // Use 32-bit intermediate to prevent overflow when adding two 10-bit numbers
+    left_threshold = static_cast<uint16_t>((static_cast<uint32_t>(left_min) + static_cast<uint32_t>(left_max)) / 2U);
+    right_threshold = static_cast<uint16_t>((static_cast<uint32_t>(right_min) + static_cast<uint32_t>(right_max)) / 2U);
 }
 
 // ============================================================================
@@ -571,16 +580,19 @@ void update_dynamic_thresholds()
 /**
  * @brief Common encoder processing logic for both wheels
  */
-void process_encoder_data(volatile uint8_t & raw_value, uint8_t & min_val, uint8_t & max_val, uint8_t & sample_count,
-                          uint8_t & threshold, uint8_t & prev_state, int32_t & enc_count, int enc_direction,
+void process_encoder_data(volatile uint16_t & raw_value, uint16_t & min_val, uint16_t & max_val, uint8_t & sample_count,
+                          uint16_t & threshold, uint8_t & prev_state, int32_t & enc_count, int enc_direction,
                           WheelKalmanState & kalman, int pwm_value)
 {
     // Update calibration data
-    if (raw_value < min_val)
-        min_val = raw_value;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        if (raw_value < min_val)
+            min_val = raw_value;
 
-    if (raw_value > max_val)
-        max_val = raw_value;
+        if (raw_value > max_val)
+            max_val = raw_value;
+    }
 
     ++sample_count;
 
@@ -599,30 +611,6 @@ void process_encoder_data(volatile uint8_t & raw_value, uint8_t & min_val, uint8
     const float measured_angle = static_cast<float>(enc_count) * RADIANS_PER_COUNT;
     kalman.update_movement_detection(enc_count, now);
     kalman.update_filter(measured_angle, now, pwm_value, enc_direction);
-}
-
-/**
- * @brief Calculates the main loop frequency
- */
-void calculate_frequency()
-{
-    static uint32_t loop_counter = 0U;
-    static uint32_t last_time = 0U;
-
-    loop_counter++;
-
-    const uint32_t current_time = millis();
-    const uint32_t elapsed_time = current_time - last_time;
-
-    if (elapsed_time >= FREQ_CALC_INTERVAL_MS)
-    {
-        // Calculate frequency (loops per second)
-        frequency = (loop_counter * 1000U + elapsed_time / 2U) / elapsed_time;
-
-        // Reset for next interval
-        last_time = current_time;
-        loop_counter = 0U;
-    }
 }
 
 /**
@@ -747,7 +735,7 @@ void processSerialCommand()
         return;
     }
 
-    // New PID gains command: P<kp>,<ki>,<kd>
+    // PID gains command: P<kp>,<ki>,<kd>
     if (*pointer == 'P')
     {
         ++pointer;
@@ -777,9 +765,7 @@ void processSerialCommand()
                 // parse Kd
                 float new_kd = static_cast<float>(strtod(pointer, &endptr));
                 if (endptr != pointer)
-                {
                     kd = new_kd;  // Update global
-                }
 
                 // Re-configure PIDs with new gains
                 left_fast_pid.configure(kp, ki, kd, PID_UPDATE_RATE_HZ, 16, true);
@@ -800,6 +786,7 @@ void processSerialCommand()
         return;  // Done processing P command
     }
 
+    // legacy manual PWM command: L<left_pwm>R<right_pwm>D<left_dir><right_dir>
     // Parse left PWM (legacy) - disables left PID
     if (*pointer == 'L')
     {
@@ -881,7 +868,7 @@ void serial_print_telemetry()
     const float left_rpm = left_state[1] * RAD_S_TO_RPM;
     const bool is_left_stuck = left_kalman.is_stuck(current_time);
     const float left_pwm_norm = static_cast<float>(left_pwm) / 255.0f;
-    const int left_enc_state = left_prev_state ? left_max : left_min;
+    const uint16_t left_enc_state = left_prev_state ? left_max : left_min;
 
     // right wheel data
     const float right_encoder_rad = static_cast<float>(right_enc_count) * RADIANS_PER_COUNT;
@@ -889,69 +876,73 @@ void serial_print_telemetry()
     const float right_rpm = right_state[1] * RAD_S_TO_RPM;
     const bool is_right_stuck = right_kalman.is_stuck(current_time);
     const float right_pwm_norm = static_cast<float>(right_pwm) / 255.0f;
-    const int right_enc_state = right_prev_state ? right_max : right_min;
+    const uint16_t right_enc_state = right_prev_state ? right_max : right_min;
 
     // Position data
-    Serial.print(">LFrd:");
+    Serial.print(">a:");
     Serial.println(left_filter_angle_rad, 4);
-    Serial.print(">RFrd:");
+    Serial.print(">b:");
     Serial.println(right_filter_angle_rad, 4);
-    Serial.print(">LErd:");
+    Serial.print(">c:");
     Serial.println(left_encoder_rad, 2);
-    Serial.print(">RErd:");
+    Serial.print(">d:");
     Serial.println(right_encoder_rad, 2);
 
     // Speed data
-    Serial.print(">Lrpm:");
+    Serial.print(">e:");
     Serial.println(left_rpm, 4);
-    Serial.print(">Rrpm:");
+    Serial.print(">f:");
     Serial.println(right_rpm, 4);
 
     // Motor control data
-    Serial.print(">Lpwm:");
+    Serial.print(">g:");
     Serial.println(left_pwm_norm, 2);
-    Serial.print(">Rpwm:");
+    Serial.print(">h:");
     Serial.println(right_pwm_norm, 2);
-    Serial.print(">Ldir:");
+    Serial.print(">i:");
     Serial.println(left_direction);
-    Serial.print(">Rdir:");
+    Serial.print(">j:");
     Serial.println(right_direction);
 
     // Movement detection
-    Serial.print(">Lstk:");
+    Serial.print(">k:");
     Serial.println(is_left_stuck);
-    Serial.print(">Rstk:");
+    Serial.print(">l:");
     Serial.println(is_right_stuck);
 
     // Encoder data
-    Serial.print(">Lraw:");
-    Serial.println(left_raw_value);
-    Serial.print(">Rraw:");
-    Serial.println(right_raw_value);
-    Serial.print(">Lmin:");
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        Serial.print(">m:");
+        Serial.println(left_raw_value);
+        Serial.print(">n:");
+        Serial.println(right_raw_value);
+    }
+    Serial.print(">o:");
     Serial.println(left_min);
-    Serial.print(">Lmax:");
+    Serial.print(">p:");
     Serial.println(left_max);
-    Serial.print(">Rmin:");
+    Serial.print(">q:");
     Serial.println(right_min);
-    Serial.print(">Rmax:");
+    Serial.print(">r:");
     Serial.println(right_max);
-    Serial.print(">Ltsh:");
+    Serial.print(">s:");
     Serial.println(left_threshold);
-    Serial.print(">Rtsh:");
+    Serial.print(">t:");
     Serial.println(right_threshold);
-    Serial.print(">Lenc:");
+    Serial.print(">u:");
     Serial.println(left_enc_state);
-    Serial.print(">Renc:");
+    Serial.print(">v:");
     Serial.println(right_enc_state);
 
-    // Frequency data
-    Serial.print(">Freq:");
-    Serial.println(frequency);
+    Serial.print(">z:");
+    Serial.println(left_enc_count);
+    Serial.print(">y:");
+    Serial.println(right_enc_count);
 }
 
 // ============================================================================
-// PID CONTROL (REFACTORED)
+// PID CONTROL
 // ============================================================================
 
 /**
@@ -1132,9 +1123,9 @@ void setup()
 
     Serial.println("Teleplot: arduino telemetry");
     Serial.println("Send commands: L<pwm>R<pwm>D<left_dir><right_dir>");
-    Serial.println("Example: L128R255D11");
-    Serial.println("Set RPM targets: T<left_rpm>,<right_rpm>  (example: T120,90)");
-    Serial.println("Set PID gains: P<kp>,<ki>,<kd>  (example: P3.0,1.0,0.2)");
+    Serial.println("Example: L128R255D11 (max: 255), dir: 1=forward,0=backward");
+    Serial.println("Set RPM targets: T<left_rpm>,<right_rpm>  (example: T20,-50), min/max: +- 5/50");
+    Serial.println("Set PID gains: P<kp>,<ki>,<kd>  (example: P3.0,1.0,6.0)");
 
     // Configure FastPID controllers
     // Parameters: kp, ki, kd, hz, bits, sign
@@ -1157,18 +1148,15 @@ void loop()
     // Update encoders and EKF
     update_encoder_and_ekf();
 
-    // Service serial (may set targets or manual PWM)
+    // Service serial
     readSerialData();
     processSerialCommand();
 
-    // Apply PID outputs if enabled based on non-blocking delay
-    if (nonBlockingDelay(last_pid_update_time, PID_UPDATE_INTERVAL_MS))
-    {
-        apply_pid_control_once();
-    }
+    // Apply PID control
+    apply_pid_control_once();
 
-    // Calculate loop frequency
-    calculate_frequency();
+    // Small delay to yield the CPU
+    delayMicroseconds(LOOP_DELAY_US);
 
 #if TELEMETRY
     static uint32_t last_telemetry_time = 0U;
